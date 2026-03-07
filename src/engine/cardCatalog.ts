@@ -53,8 +53,9 @@ const STRONGHOLD_STATS: Record<string, { startingHonor: number; provinceStrength
   'Shiro no Yojin':                     { startingHonor: 7,  provinceStrength: 6 },
   'Kyuden Ikoma':                       { startingHonor: 7,  provinceStrength: 6 },
   // Phoenix
-  'Kyuden Isawa':                       { startingHonor: 8,  provinceStrength: 5 },
-  'Temple of Purity':                   { startingHonor: 7,  provinceStrength: 5 },
+  'Kyuden Isawa':                                    { startingHonor: 8,  provinceStrength: 5 },
+  'Temple of Purity':                                { startingHonor: 7,  provinceStrength: 5 },
+  'The Majestic Temple of the Phoenix':              { startingHonor: 7,  provinceStrength: 6 },
   // Scorpion
   'Kyuden Bayushi':                     { startingHonor: 4,  provinceStrength: 6 },
   'Shiro no Shosuro':                   { startingHonor: 3,  provinceStrength: 7 },

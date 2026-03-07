@@ -105,6 +105,8 @@ export type ZoneId =
   | 'personalitiesHome'   // personalities at home (not in battle)
   | 'holdingsInPlay'      // holdings always stay in play, no "home" concept
   | 'specialsInPlay'      // celestials and rings in play
+  | 'honorablyDead'       // personalities killed in battle (distinct from discard)
+  | 'dishonorablelyDead'  // personalities killed by dishonor effects
   | 'province0'
   | 'province1'
   | 'province2'
@@ -183,13 +185,23 @@ export interface PlayerState {
    * Reset to [] at the start of each new turn (Straighten Phase).
    */
   abilitiesUsed: string[];
+  /**
+   * Personalities killed honorably in battle.
+   * Distinct from the discard pile — many card effects specifically reference dead personalities.
+   */
+  honorablyDead: CardInstance[];
+  /**
+   * Personalities killed dishonorably (dishonor, poison, etc.).
+   * Reserved for future card effects; currently not populated.
+   */
+  dishonorablelyDead: CardInstance[];
 }
 
 // ─── Game Log ────────────────────────────────────────────────────────────────
 
 export type LogCategory =
   | 'draw' | 'bow' | 'gold' | 'recruit' | 'phase'
-  | 'cycle' | 'discard' | 'priority' | 'other';
+  | 'cycle' | 'discard' | 'priority' | 'battle' | 'honor' | 'other';
 
 export interface LogEntry {
   id: string;

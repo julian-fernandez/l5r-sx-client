@@ -4,19 +4,35 @@ import type { TurnPhase } from '../store/gameStore';
 // ─── Timing & play validation ────────────────────────────────────────────────
 
 /**
- * Extract timing window tags from a card's keyword list.
+ * Extract timing window tags from a card, checking BOTH the text field and
+ * the keywords array.  Text is the authoritative source because timing markers
+ * ("Battle:", "Open:", …) appear in card text, and the keyword array may or
+ * may not include them depending on the extraction process.
+ *
  * Returns a lower-cased set: 'limited', 'open', 'battle', 'engage'.
- * A card with no timing tags defaults to Open.
+ * A card with no timing tags defaults to Open (see canPlayFromHand).
  */
 export function getCardTimings(card: NormalizedCard): Set<string> {
   const timings = new Set<string>();
-  for (const kw of card.keywords) {
-    const lc = kw.toLowerCase();
-    if (lc.startsWith('limited')) timings.add('limited');
-    if (lc.startsWith('open'))    timings.add('open');
-    if (lc.startsWith('battle'))  timings.add('battle');
-    if (lc.startsWith('engage'))  timings.add('engage');
+
+  // Primary: scan card text for timing prefixes (most reliable source)
+  if (card.text) {
+    const re = /\b(Limited|Open|Battle|Engage):/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(card.text)) !== null) {
+      timings.add(m[1].toLowerCase());
+    }
   }
+
+  // Secondary: also honour explicit timing keywords (e.g. keyword = "Battle")
+  for (const kw of card.keywords) {
+    const lc = kw.toLowerCase().trim();
+    if (lc === 'limited' || lc.startsWith('limited:')) timings.add('limited');
+    if (lc === 'open'    || lc.startsWith('open:'))    timings.add('open');
+    if (lc === 'battle'  || lc.startsWith('battle:'))  timings.add('battle');
+    if (lc === 'engage'  || lc.startsWith('engage:'))  timings.add('engage');
+  }
+
   return timings;
 }
 
