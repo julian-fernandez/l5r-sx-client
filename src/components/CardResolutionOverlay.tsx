@@ -12,7 +12,7 @@
  * `onConfirm(abilityText?)` is called with the selected ability text so the
  * store can include it in the game log.
  */
-import { useState } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import type { CardInstance, CardType, NormalizedCard } from '../types/cards';
 import { canAttachTo, parseCardAbilities, type AbilityTiming, type ParsedAbility } from '../engine/gameActions';
 import { CardImage } from './CardImage';
@@ -28,6 +28,8 @@ interface Props {
    * e.g. new Set(['open', 'limited']) during the Action phase.
    */
   validTimings: Set<string>;
+  /** Current gold pool — used to block resolution when the player can't afford the cost */
+  goldPool: number;
   /** Called when the player confirms; receives the chosen ability text for logging */
   onConfirm: (abilityText?: string) => void;
   onCancel: () => void;
@@ -68,27 +70,21 @@ const TIMING_STYLES: Record<AbilityTiming, { badge: string; selected: string; ho
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export function CardResolutionOverlay({
-  instance, targetId, personalities, validTimings, onConfirm, onCancel,
+  instance, targetId, personalities, validTimings, goldPool, onConfirm, onCancel,
 }: Props) {
   const { card } = instance;
   const isAttachment = (['item', 'follower', 'spell'] as CardType[]).includes(card.type);
   const cost = Math.max(0, Number(card.cost) || 0);
+  const canAfford = goldPool >= cost;
 
   // ── Ability parsing (strategies only) ─────────────────────────────────────
   const allAbilities: ParsedAbility[] = isAttachment ? [] : parseCardAbilities(card.text);
   const timedAbilities = allAbilities.filter(a => a.timing !== 'trait') as Array<ParsedAbility & { timing: AbilityTiming }>;
   const traitText      = allAbilities.filter(a => a.timing === 'trait').map(a => a.text).join(' ');
 
-  // Abilities usable at current timing
-  const validAbilities = timedAbilities.filter(a =>
-    validTimings.has(a.timing.toLowerCase()),
-  );
-
-  // If the card has no parsed timed abilities, treat entire card as a single
-  // unstructured strategy (old-style text without timing markers)
+  const validAbilities = timedAbilities.filter(a => validTimings.has(a.timing.toLowerCase()));
   const hasAbilityStructure = timedAbilities.length > 0;
 
-  // Auto-select when only one ability is valid
   const [selectedIdx, setSelectedIdx] = useState<number | null>(
     validAbilities.length === 1 ? timedAbilities.indexOf(validAbilities[0]) : null,
   );
@@ -98,9 +94,11 @@ export function CardResolutionOverlay({
   const validTargets      = isAttachment ? personalities.filter(p => canAttachTo(card, p)) : [];
 
   // ── Confirm gate ─────────────────────────────────────────────────────────
-  const canConfirm = isAttachment
-    ? targetId !== null
-    : !hasAbilityStructure || selectedIdx !== null;
+  const canConfirm = canAfford && (
+    isAttachment
+      ? targetId !== null
+      : !hasAbilityStructure || selectedIdx !== null
+  );
 
   const handleConfirm = () => {
     if (!canConfirm) return;
@@ -112,77 +110,128 @@ export function CardResolutionOverlay({
     }
   };
 
+  // ── Draggable panel ───────────────────────────────────────────────────────
+  const [pos, setPos] = useState(() => ({
+    x: Math.max(0, window.innerWidth  - 460),
+    y: Math.max(0, window.innerHeight / 2 - 200),
+  }));
+  const dragRef = useRef<{ startX: number; startY: number; origX: number; origY: number } | null>(null);
+
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      if (!dragRef.current) return;
+      setPos({
+        x: dragRef.current.origX + (e.clientX - dragRef.current.startX),
+        y: dragRef.current.origY + (e.clientY - dragRef.current.startY),
+      });
+    };
+    const onUp = () => { dragRef.current = null; };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+    return () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    };
+  }, []);
+
+  const handleDragStart = (e: React.MouseEvent) => {
+    e.preventDefault();
+    dragRef.current = { startX: e.clientX, startY: e.clientY, origX: pos.x, origY: pos.y };
+  };
+
   const typeColor = TYPE_COLOR[card.type] ?? 'text-gray-300';
 
+  // No backdrop — the panel floats over the board so the player can click
+  // personalities / provinces behind it while choosing targets or abilities.
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center"
-      style={{ background: 'rgba(0,0,0,0.75)', backdropFilter: 'blur(2px)' }}
-      onClick={(e) => { if (e.target === e.currentTarget) onCancel(); }}
+      className="fixed z-50 flex flex-col rounded-2xl border border-board-border shadow-2xl select-none overflow-hidden"
+      style={{ left: pos.x, top: pos.y, width: 420, maxHeight: '90vh', background: '#0f1117' }}
     >
+      {/* ── Drag handle / title bar ──────────────────────────────────── */}
       <div
-        className="flex gap-0 rounded-2xl overflow-hidden border border-board-border shadow-2xl"
-        style={{ maxHeight: '90vh', background: '#0f1117' }}
-        onClick={(e) => e.stopPropagation()}
+        className="flex items-center justify-between px-4 py-2 bg-white/5 border-b border-board-border cursor-grab active:cursor-grabbing flex-shrink-0"
+        onMouseDown={handleDragStart}
       >
-        {/* ── Left: Large card image ─────────────────────────────────── */}
-        <div
-          className="relative flex-shrink-0 flex items-center justify-center bg-black/40"
-          style={{ width: '28vh', padding: '1.5vh' }}
+        <div className="flex items-center gap-2">
+          <span className="text-[8px] font-bold uppercase tracking-widest text-gray-500">Playing Card</span>
+          <span className="text-[8px] text-gray-700">· drag to move</span>
+        </div>
+        <button
+          onClick={onCancel}
+          className="text-gray-600 hover:text-gray-300 transition-colors text-sm leading-none w-5 h-5 flex items-center justify-center rounded hover:bg-white/10"
         >
-          <div
-            className="relative rounded-xl overflow-hidden shadow-xl ring-2 ring-board-border"
-            style={{ width: '25vh', height: '35vh' }}
-          >
+          ✕
+        </button>
+      </div>
+
+      {/* ── Body: card image + details side by side ───────────────────── */}
+      <div className="flex overflow-hidden flex-1 min-h-0">
+        {/* Card image */}
+        <div
+          className="flex-shrink-0 flex items-start justify-center bg-black/30 pt-4 pb-4"
+          style={{ width: 130, paddingLeft: 12, paddingRight: 12 }}
+        >
+          <div className="rounded-xl overflow-hidden shadow-xl ring-1 ring-board-border" style={{ width: 106, height: 148 }}>
             <CardImage card={card} className="w-full h-full object-cover" alt={card.name} />
-          </div>
-          <div className="absolute top-3 left-0 right-0 flex justify-center pointer-events-none">
-            <span className="text-[9px] font-bold uppercase tracking-widest text-gray-500 bg-black/60 px-2 py-0.5 rounded">
-              Playing
-            </span>
           </div>
         </div>
 
-        {/* ── Right: Details + ability picker ───────────────────────── */}
-        <div className="flex flex-col gap-3 p-5 overflow-y-auto" style={{ width: '34vh', minWidth: 280, maxHeight: '90vh' }}>
+        {/* Details + controls */}
+        <div className="flex flex-col gap-3 p-4 overflow-y-auto flex-1 min-w-0">
 
           {/* Card name + type */}
           <div>
-            <h2 className="text-[15px] font-bold text-white leading-tight">{card.name}</h2>
+            <h2 className="text-[14px] font-bold text-white leading-tight">{card.name}</h2>
             <div className="flex items-center gap-2 mt-0.5 flex-wrap">
               <span className={`text-[10px] font-semibold capitalize ${typeColor}`}>{card.type}</span>
               {card.clan && <span className="text-[9px] text-gray-600 capitalize">{card.clan}</span>}
-              {cost > 0 && <span className="text-[9px] font-bold text-yellow-400/80">◆ {cost}g</span>}
             </div>
           </div>
+
+          {/* Gold cost + pool */}
+          {cost > 0 && (
+            <div className={`flex items-center gap-2 rounded-lg border px-2.5 py-1.5 ${
+              canAfford
+                ? 'border-yellow-700/40 bg-yellow-950/20'
+                : 'border-red-700/60 bg-red-950/30 animate-pulse'
+            }`}>
+              <span className={`text-sm font-bold tabular-nums ${canAfford ? 'text-yellow-300' : 'text-red-400'}`}>
+                ◆ {cost}g
+              </span>
+              <span className="text-[9px] text-gray-600">cost</span>
+              <span className="ml-auto text-[9px] font-semibold tabular-nums text-gray-400">
+                pool: <span className={canAfford ? 'text-yellow-400' : 'text-red-400'}>{goldPool}g</span>
+              </span>
+              {!canAfford && (
+                <span className="text-[8px] text-red-500 font-semibold">need {cost - goldPool}g more</span>
+              )}
+            </div>
+          )}
 
           {/* ── Strategy: ability picker ──────────────────────────────── */}
           {!isAttachment && (
             <div className="flex flex-col gap-2">
-              {/* Trait text (passive) */}
               {traitText && (
                 <p className="text-[9px] text-gray-500 leading-relaxed italic">{traitText}</p>
               )}
-
-              {/* Ability list */}
               {hasAbilityStructure ? (
                 <>
                   <p className="text-[8px] text-gray-600 font-semibold uppercase tracking-wider">
-                    Select an ability to use:
+                    Choose one ability:
                   </p>
                   <div className="flex flex-col gap-1.5">
                     {timedAbilities.map((ab, i) => {
-                      const styles   = TIMING_STYLES[ab.timing];
-                      const isValid  = validTimings.has(ab.timing.toLowerCase());
-                      const isSel    = selectedIdx === i;
-
+                      const styles  = TIMING_STYLES[ab.timing];
+                      const isValid = validTimings.has(ab.timing.toLowerCase());
+                      const isSel   = selectedIdx === i;
                       return (
                         <button
                           key={i}
                           disabled={!isValid}
                           onClick={() => setSelectedIdx(i)}
                           className={[
-                            'text-left rounded-lg border px-3 py-2 transition-all',
+                            'text-left rounded-lg border px-2.5 py-1.5 transition-all',
                             isValid
                               ? isSel
                                 ? styles.selected + ' cursor-default'
@@ -190,19 +239,13 @@ export function CardResolutionOverlay({
                               : 'border-board-border bg-transparent opacity-30 cursor-not-allowed',
                           ].join(' ')}
                         >
-                          {/* Timing badge */}
-                          <div className="flex items-center gap-1.5 mb-1">
+                          <div className="flex items-center gap-1.5 mb-0.5">
                             <span className={`text-[7px] font-bold uppercase tracking-wider px-1.5 py-px rounded border ${styles.badge}`}>
                               {ab.timing}
                             </span>
-                            {!isValid && (
-                              <span className="text-[7px] text-gray-600 italic">wrong timing</span>
-                            )}
-                            {isSel && (
-                              <span className="text-[7px] font-bold text-emerald-400">✓ selected</span>
-                            )}
+                            {!isValid && <span className="text-[7px] text-gray-600 italic">wrong timing</span>}
+                            {isSel   && <span className="text-[7px] font-bold text-emerald-400">✓</span>}
                           </div>
-                          {/* Ability text */}
                           <p className="text-[9px] leading-snug text-gray-400">{ab.text}</p>
                         </button>
                       );
@@ -210,7 +253,6 @@ export function CardResolutionOverlay({
                   </div>
                 </>
               ) : (
-                /* No timing structure — show raw text */
                 <p className="text-[10px] text-gray-400 leading-relaxed">{card.text || 'No text.'}</p>
               )}
             </div>
@@ -218,7 +260,7 @@ export function CardResolutionOverlay({
 
           {/* ── Attachment target status ──────────────────────────────── */}
           {isAttachment && (
-            <div className={`rounded-lg border px-3 py-2 text-[9px] leading-relaxed ${
+            <div className={`rounded-lg border px-2.5 py-2 text-[9px] leading-relaxed ${
               targetPersonality
                 ? 'border-emerald-700/60 bg-emerald-950/30 text-emerald-300'
                 : validTargets.length > 0
@@ -226,20 +268,18 @@ export function CardResolutionOverlay({
                   : 'border-red-900/60 bg-red-950/20 text-red-500'
             }`}>
               {targetPersonality
-                ? `Equip to: ${targetPersonality.card.name}`
+                ? `→ ${targetPersonality.card.name}`
                 : validTargets.length > 0
-                  ? 'Click a highlighted personality to select target'
-                  : 'No valid targets — cannot play this card'}
+                  ? 'Click a highlighted personality on the board'
+                  : 'No valid targets in play'}
               {targetPersonality && (
-                <div className="text-[8px] text-emerald-600 mt-0.5">
-                  {targetPersonality.card.keywords.join(', ')}
-                </div>
+                <div className="text-[8px] text-emerald-600 mt-0.5">{targetPersonality.card.keywords.join(', ')}</div>
               )}
             </div>
           )}
 
-          {/* ── Buttons ──────────────────────────────────────────────── */}
-          <div className="flex gap-2 pt-1 flex-shrink-0">
+          {/* ── Action buttons ────────────────────────────────────────── */}
+          <div className="flex gap-2 flex-shrink-0">
             <button
               onClick={onCancel}
               className="flex-1 text-[11px] font-semibold py-1.5 rounded-lg border border-gray-700
@@ -254,10 +294,13 @@ export function CardResolutionOverlay({
                 'flex-1 text-[11px] font-bold py-1.5 rounded-lg border transition-colors',
                 canConfirm
                   ? 'border-emerald-600 text-emerald-200 bg-emerald-950/60 hover:bg-emerald-900/70'
-                  : 'border-gray-800 text-gray-700 cursor-not-allowed',
+                  : !canAfford
+                    ? 'border-red-900/60 text-red-700 cursor-not-allowed'
+                    : 'border-gray-800 text-gray-700 cursor-not-allowed',
               ].join(' ')}
+              title={!canAfford ? `Need ${cost}g — bow holdings or stronghold to build your gold pool` : undefined}
             >
-              {isAttachment ? 'Equip →' : 'Resolve →'}
+              {!canAfford ? `Need ${cost}g` : isAttachment ? 'Equip →' : 'Resolve →'}
             </button>
           </div>
         </div>
