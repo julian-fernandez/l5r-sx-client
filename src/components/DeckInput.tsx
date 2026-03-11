@@ -2,67 +2,10 @@ import { useState, useEffect } from 'react';
 import type { NormalizedCard, ParsedDeck } from '../types/cards';
 import { parseDeck } from '../engine/deckParser';
 import { useGameStore } from '../store/gameStore';
+import { UNICORN_TEST_DECK } from '../engine/testFixtures';
 
-const SAMPLE_DECK = `# Stronghold
-1 Plains of the Maiden
-
-# Sensei
-1 Min-Hee Sensei
-
-# Pregame Holdings
-1 Border Keep - exp2
-1 Bamboo Harvesters - exp
-
-# Dynasty
-# Personalities (22)
-1 Utaku Liu Xeung - exp
-3 Utaku Ji-Yun
-3 Utaku Lishan
-3 Utaku Mai
-3 Utaku Ryoko
-3 Utaku Sung-Ki
-1 Utaku Ji-Yun - exp
-3 Utaku Eun-ju
-1 Utaku Kohana - exp
-1 Moto Naleesh
-# Holdings (12)
-3 Small Farm
-3 Stables
-3 Spirit's Essence Dojo
-1 Chugo Seido
-1 Ageless Shrine
-1 Traveling Peddler
-# Celestials (2)
-1 Jurojin's Blessing
-1 Sadahako's Artistry
-# Regions (2)
-1 Shinden Shorai
-1 The Second City
-# Events (2)
-1 Imperial Gift
-1 Military Alliance
-
-# Fate
-# Strategies (35)
-3 A Paragon's Strength
-3 Cast Aside the Weak
-3 Grateful Reward
-3 Surety of Purpose
-2 Two-Fold Virtue
-3 The Perfect Moment
-3 The Compassion of the Unicorn
-1 Creating Order
-3 Pure Intent
-2 The Sound of Thunder
-3 Riding in Harmony
-3 Shinjo's Courage
-3 A Noble End
-# Items (1)
-1 The Blessed Mantle of the Greensnakes
-# Followers (3)
-3 Utaku Elite Guard
-# Rings (1)
-1 Ring of the Void`;
+// Use the same deck string as the test-game fixture so both always stay in sync
+const SAMPLE_DECK = UNICORN_TEST_DECK;
 
 interface Props {
   onLoad: (deck: ParsedDeck) => void;
@@ -79,6 +22,7 @@ export function DeckInput({ onLoad }: Props) {
   const lastDeckText = useGameStore(s => s.lastDeckText);
   const setLastDeckText = useGameStore(s => s.setLastDeckText);
   const setStrongholdOverride = useGameStore(s => s.setStrongholdOverride);
+  const loadTestGame = useGameStore(s => s.loadTestGame);
 
   const [text, setText] = useState(lastDeckText || SAMPLE_DECK);
   const [parsed, setParsed] = useState<ParsedDeck | null>(null);
@@ -136,6 +80,26 @@ export function DeckInput({ onLoad }: Props) {
           L5R · Samurai Extended
         </h1>
         <p className="text-sm text-gray-500">Solo proof of concept · Paste deck to begin</p>
+      </div>
+
+      {/* Quick-start test game */}
+      <div className="flex flex-col items-center gap-1.5">
+        <button
+          onClick={loadTestGame}
+          disabled={!catalogLoaded}
+          className="flex items-center gap-2.5 px-5 py-2.5 rounded-xl font-semibold text-sm
+            bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 hover:border-amber-400/60
+            text-amber-300 hover:text-amber-200 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          <span className="text-base">⚔</span>
+          Test Game
+          <span className="text-[10px] font-normal text-amber-500/70 bg-amber-900/30 px-1.5 py-0.5 rounded-md ml-1">
+            Turn 4 · Unicorn vs Phoenix
+          </span>
+        </button>
+        <p className="text-[10px] text-gray-600">
+          Loads a mid-game snapshot — personalities, holdings, attachments, dead cards, broken province
+        </p>
       </div>
 
       <div className="w-full max-w-3xl flex gap-5">
