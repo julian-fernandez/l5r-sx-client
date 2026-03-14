@@ -41,6 +41,7 @@ export function parseDeck(text: string): ParsedDeck {
     dynasty: [],
     fate: [],
     missing: [],
+    violations: [],
   };
 
   let section: SectionKey = null;
@@ -91,6 +92,27 @@ export function parseDeck(text: string): ParsedDeck {
       result.fate.push(entry);
     } else {
       result.dynasty.push(entry); // safe fallback
+    }
+  }
+
+  // ── Deckbuilding validation ─────────────────────────────────────────────────
+  const shClan = result.stronghold[0]?.card?.clan ?? null;
+  const allEntries = [...result.dynasty, ...result.fate, ...result.pregameHoldings];
+
+  for (const entry of allEntries) {
+    if (!entry.card) continue;
+    const kws = entry.card.keywords.map(k => k.toLowerCase().trim());
+
+    if (kws.includes('unique') && entry.quantity > 1) {
+      result.violations.push(
+        `${entry.name}: Unique — only 1 copy allowed (${entry.quantity} listed)`,
+      );
+    }
+
+    if (kws.includes('loyal') && shClan && entry.card.clan !== shClan) {
+      result.violations.push(
+        `${entry.name}: Loyal (${entry.card.clan ?? 'unknown'}) — cannot go in a ${shClan} deck`,
+      );
     }
   }
 

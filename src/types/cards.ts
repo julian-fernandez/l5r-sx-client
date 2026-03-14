@@ -94,6 +94,17 @@ export interface CardInstance {
   attachments: CardInstance[];
   fateTokens: number;
   honorTokens: number;
+  /**
+   * Temporary Force bonus granted by Tactician this battle.
+   * Added to calcUnitForce; cleared when the Attack Phase ends or a new turn begins.
+   */
+  tempForceBonus: number;
+  /**
+   * True when the personality has been dishonored (by a card effect, manually, etc.).
+   * Dishonored personalities that die become Dishonorably Dead instead of Honorably Dead,
+   * and their controller loses Family Honor equal to the personality's printed Personal Honor.
+   */
+  dishonored: boolean;
 }
 
 export type ZoneId =
@@ -227,4 +238,5 @@ export interface ParsedDeck {
   dynasty: DeckEntry[];   // personalities, holdings, regions, events, celestials
   fate: DeckEntry[];      // strategies, spells, items, followers, rings
   missing: string[];      // card names that couldn't be matched
+  violations: string[];   // deckbuilding rule violations (Loyal, Unique)
 }

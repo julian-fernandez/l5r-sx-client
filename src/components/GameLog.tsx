@@ -15,6 +15,8 @@ const CATEGORY_COLOR: Record<LogCategory, string> = {
   cycle:    'text-violet-400',
   discard:  'text-red-400',
   priority: 'text-indigo-400',
+  battle:   'text-rose-400',
+  honor:    'text-amber-300',
   other:    'text-gray-500',
 };
 
@@ -27,6 +29,8 @@ const CATEGORY_DOT: Record<LogCategory, string> = {
   cycle:    'bg-violet-400',
   discard:  'bg-red-400',
   priority: 'bg-indigo-400',
+  battle:   'bg-rose-500',
+  honor:    'bg-amber-400',
   other:    'bg-gray-600',
 };
 

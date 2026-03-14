@@ -6,11 +6,12 @@ interface Props {
   card: NormalizedCard;
   className?: string;
   alt?: string;
+  style?: React.CSSProperties;
 }
 
 const CARD_BACK = '/images/cardback.jpg';
 
-export function CardImage({ card, className = '', alt }: Props) {
+export function CardImage({ card, className = '', alt, style }: Props) {
   const candidates = resolveImageCandidates(card);
   const [index, setIndex] = useState(0);
 
@@ -28,6 +29,7 @@ export function CardImage({ card, className = '', alt }: Props) {
       src={src}
       alt={alt ?? card.name}
       className={className}
+      style={style}
       onError={handleError}
       loading="lazy"
       draggable={false}

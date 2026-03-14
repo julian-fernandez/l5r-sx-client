@@ -233,7 +233,7 @@ export function BattleStrip({ battleAssignments, defenderAssignments, battleStag
         <div className="flex gap-2 flex-wrap">
           {battlefields.map(([provinceIndex, assignments]) => {
             const bf = BATTLEFIELD_STYLES[provinceIndex] ?? BATTLEFIELD_STYLES[0];
-            const { strength, defenderForce, defenseTotal, attackers, defenders, totalForce, winning } = stats(provinceIndex, assignments);
+            const { defenseTotal, attackers, defenders, totalForce, winning } = stats(provinceIndex, assignments);
             return (
               <div
                 key={provinceIndex}

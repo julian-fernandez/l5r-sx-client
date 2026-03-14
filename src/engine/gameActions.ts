@@ -183,6 +183,67 @@ export function isCavalryUnit(personality: CardInstance): boolean {
 }
 
 /**
+ * Returns true when the personality has the Conqueror keyword.
+ * Conqueror units do not bow when they return home after winning a battle.
+ */
+export function isConquerorUnit(personality: CardInstance): boolean {
+  return personality.card.keywords.some(k => k.toLowerCase().trim() === 'conqueror');
+}
+
+/**
+ * Extract the numeric value from a keyword like "Fear 3" or "Melee Attack 2".
+ * `kwType` should be the lowercase prefix to match (e.g. 'fear', 'melee attack').
+ */
+export function extractKeywordValue(keywords: string[], kwType: string): number | null {
+  const lcType = kwType.toLowerCase();
+  for (const kw of keywords) {
+    const lc = kw.toLowerCase().trim();
+    if (lc.startsWith(lcType)) {
+      const rest = lc.slice(lcType.length).trim();
+      const n = parseInt(rest, 10);
+      if (!isNaN(n)) return n;
+    }
+  }
+  return null;
+}
+
+export type BattleKeywordType = 'fear' | 'melee' | 'ranged' | 'reserve';
+
+export interface BattleKeywordAbility {
+  type: BattleKeywordType | 'tactician';
+  value: number;  // focus value for tactician is resolved at activation time
+  label: string;
+}
+
+/**
+ * Returns all battle-usable keyword abilities on a personality card:
+ * Fear X, Melee Attack X, Ranged Attack X, and Tactician.
+ */
+export function getBattleKeywordAbilities(card: NormalizedCard): BattleKeywordAbility[] {
+  const abilities: BattleKeywordAbility[] = [];
+  const kws = card.keywords;
+
+  const fearVal = extractKeywordValue(kws, 'fear');
+  if (fearVal !== null) abilities.push({ type: 'fear',   value: fearVal, label: `Fear ${fearVal}` });
+
+  const meleeVal = extractKeywordValue(kws, 'melee attack');
+  if (meleeVal !== null) abilities.push({ type: 'melee', value: meleeVal, label: `Melee Attack ${meleeVal}` });
+
+  const rangedVal = extractKeywordValue(kws, 'ranged attack');
+  if (rangedVal !== null) abilities.push({ type: 'ranged', value: rangedVal, label: `Ranged Attack ${rangedVal}` });
+
+  if (kws.some(k => k.toLowerCase().trim() === 'tactician')) {
+    abilities.push({ type: 'tactician', value: 0, label: 'Tactician' });
+  }
+
+  if (kws.some(k => k.toLowerCase().trim() === 'reserve')) {
+    abilities.push({ type: 'reserve', value: 0, label: 'Reserve' });
+  }
+
+  return abilities;
+}
+
+/**
  * Calculate the Force a personality unit contributes to its army.
  *
  * Per the Comprehensive Rules (p.15):
@@ -224,7 +285,20 @@ export function calcUnitForce(personality: CardInstance, forResolution: boolean)
     // Spells have no Force stat contribution
   }
 
+  // Tactician bonus — always added (even when bowed the unit contributes 0 anyway)
+  force += personality.tempForceBonus;
+
   return Math.max(0, force);
+}
+
+/**
+ * Effective Force of a follower for targeting purposes (Fear / Melee / Ranged checks).
+ * Uses the follower's base Force stat plus any active modifiers (tempForceBonus, etc.).
+ * Bowed/unbowed state is irrelevant here — bowing removes contribution to army totals
+ * during resolution, but does not change the follower's Force stat itself.
+ */
+export function calcFollowerForce(follower: CardInstance): number {
+  return Math.max(0, (Number(follower.card.force) || 0) + follower.tempForceBonus);
 }
 
 let instanceCounter = 0;
@@ -240,6 +314,8 @@ export function createInstance(card: NormalizedCard, location: ZoneId, faceUp = 
     attachments: [],
     fateTokens: 0,
     honorTokens: 0,
+    tempForceBonus: 0,
+    dishonored: false,
   };
 }
 

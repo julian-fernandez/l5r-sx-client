@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import type { BattleAssignment, CardInstance, LogCategory, LogEntry, NormalizedCard, ParsedDeck, PlayerState, Province, ZoneId } from '../types/cards';
-import { calcUnitForce, createInstance, expandDeck, shuffle } from '../engine/gameActions';
+import { calcUnitForce, calcFollowerForce, createInstance, expandDeck, shuffle, isConquerorUnit } from '../engine/gameActions';
+import type { BattleKeywordType } from '../engine/gameActions';
 import { parseDeck } from '../engine/deckParser';
 import { applyMidGameState, UNICORN_TEST_DECK, PHOENIX_TEST_DECK } from '../engine/testFixtures';
 
@@ -76,6 +77,11 @@ interface GameStore {
   strongholdOverride: { honor: number; gold: number; provinceStrength: number } | null;
   /** Append-only game log — records every meaningful action */
   gameLog: LogEntry[];
+  /**
+   * Set when the game ends. null = game is still in progress.
+   * reason: 'honor' = Honor victory (40+); 'dishonor' = Dishonor defeat (≤ −20).
+   */
+  gameResult: { winner: 'player' | 'opponent'; reason: 'honor' | 'dishonor' } | null;
 
   setCatalogLoaded: (loaded: boolean) => void;
   setStrongholdOverride: (o: { honor: number; gold: number; provinceStrength: number } | null) => void;
@@ -199,6 +205,35 @@ interface GameStore {
    * Called by the auto-opponent when the stage moves to 'resolving'.
    */
   assignDefender: (instanceId: string, provinceIndex: number) => void;
+  /**
+   * Apply a Fear / Melee Attack / Ranged Attack keyword action.
+   * The follower-shield rule is enforced automatically: if the target personality
+   * has any unbowed followers with Force ≤ value, the first one is targeted instead.
+   */
+  applyBattleKeyword: (
+    sourceId: string,
+    targetPersonalityId: string,
+    type: BattleKeywordType,
+    value: number,
+  ) => void;
+  /**
+   * Tactician action: discard a Fate card from hand to grant the personality
+   * a Force bonus equal to the card's Focus Value for the rest of the battle.
+   */
+  activateTactician: (personalityId: string, fateCardInstanceId: string) => void;
+  /**
+   * Reserve action: during the Engage or Battle window, spend gold to recruit
+   * the face-up card in `provinceIndex` directly to the current battlefield.
+   * Holdings enter play bowed; personalities are auto-assigned to the current battlefield.
+   * Once per turn (tracked via abilitiesUsed using the source personality's instanceId).
+   */
+  reserveRecruit: (provinceIndex: number, sourcePersonalityId: string) => void;
+  /**
+   * Toggle the dishonored state of a personality.
+   * Dishonored personalities that die become Dishonorably Dead; their controller
+   * loses Family Honor equal to the personality's printed Personal Honor.
+   */
+  dishonorPersonality: (instanceId: string, target: 'player' | 'opponent') => void;
 }
 
 function emptyPlayer(): PlayerState {
@@ -347,6 +382,18 @@ function applyRevealProvinces(state: PlayerState): PlayerState {
       };
     }
 
+    if (cardType === 'region') {
+      // Region attaches to the province; the province refills face-down with a new card
+      const regionInst: CardInstance = { ...faceUpInst, location: p.card.location as ZoneId };
+      const [next = null, ...rest] = dynastyDeck;
+      dynastyDeck = rest;
+      return {
+        ...p, faceUp: false,
+        card: next ? { ...next, location: p.card.location, faceUp: false, bowed: false } : null,
+        region: regionInst,
+      };
+    }
+
     return { ...p, faceUp: true, card: faceUpInst };
   });
 
@@ -386,6 +433,7 @@ export const useGameStore = create<GameStore>((set, get) => {
   lastDeckText: '',
   strongholdOverride: null,
   gameLog: [],
+  gameResult: null,
   battleAssignments: [],
   defenderAssignments: [],
   battleStage: null,
@@ -575,6 +623,18 @@ export const useGameStore = create<GameStore>((set, get) => {
 
     // Place recruited card into the right zone; holdings always enter play bowed
     const isHolding = inst.card.type === 'holding';
+
+    // Singular: only one copy of this card may be in play at a time
+    if (!isHolding) {
+      const isSingular = inst.card.keywords.some(k => k.toLowerCase().trim() === 'singular');
+      if (isSingular && ps.personalitiesHome.some(p => p.card.id === inst.card.id)) {
+        pushLog(
+          `Cannot recruit ${inst.card.name} — Singular card already in play`,
+          'recruit', target,
+        );
+        return;
+      }
+    }
     const recruited: CardInstance = {
       ...inst,
       location: isHolding ? 'holdingsInPlay' : 'personalitiesHome',
@@ -741,15 +801,26 @@ export const useGameStore = create<GameStore>((set, get) => {
     if (turnPhase === 'end') {
       if (ps.hand.length > HAND_LIMIT) return;
 
+      // ── Victory condition: Dishonor (≤ −20) at end of active player's turn ──
+      if (ps.familyHonor <= -20) {
+        const winner: 'player' | 'opponent' = activePlayer === 'player' ? 'opponent' : 'player';
+        pushLog(
+          `${activePlayer === 'player' ? 'You have' : 'Opponent has'} reached −20 Honor — Dishonor defeat!`,
+          'honor', 'system',
+        );
+        set({ gameResult: { winner, reason: 'dishonor' } });
+        return;
+      }
+
       const newActive: 'player' | 'opponent' = activePlayer === 'player' ? 'opponent' : 'player';
       const incoming = st[newActive];
 
-      // Straighten: unbow everything, reset per-turn flags
+      // Straighten: unbow everything, reset per-turn flags, clear battle bonuses
       const straightened: PlayerState = {
         ...incoming,
         strongholdBowed: false,
         holdingsInPlay:     incoming.holdingsInPlay.map(c => ({ ...c, bowed: false })),
-        personalitiesHome:  incoming.personalitiesHome.map(c => ({ ...c, bowed: false })),
+        personalitiesHome:  incoming.personalitiesHome.map(c => ({ ...c, bowed: false, tempForceBonus: 0 })),
         specialsInPlay:     incoming.specialsInPlay.map(c => ({ ...c, bowed: false })),
         proclaimUsed: false,
         goldPool: 0,
@@ -759,6 +830,16 @@ export const useGameStore = create<GameStore>((set, get) => {
       // Per SX rules: all face-down province cards flip face-up at the start of every turn.
       // Events and Celestials resolve immediately (same as the first-turn flip).
       const revealed = applyRevealProvinces(straightened);
+
+      // ── Victory condition: Honor (≥ 40) at start of incoming player's turn ──
+      if (revealed.familyHonor >= 40) {
+        pushLog(
+          `${newActive === 'player' ? 'You begin' : 'Opponent begins'} their turn with ${revealed.familyHonor} Honor — Honor victory!`,
+          'honor', 'system',
+        );
+        set({ gameResult: { winner: newActive, reason: 'honor' }, [newActive]: revealed });
+        return;
+      }
 
       pushLog(
         `Turn ${st.turnNumber} ended — Turn ${st.turnNumber + 1} begins (${newActive === 'player' ? 'Your' : "Opponent's"} turn). Face-down provinces revealed.`,
@@ -1051,66 +1132,105 @@ export const useGameStore = create<GameStore>((set, get) => {
           : `Province ${provinceIndex + 1} holds. (${attackingForce}f vs ${opponent.provinceStrength}s + ${defendingForce}f)`;
         pushLog(resultMsg, 'phase', 'system');
 
+        // Discard any region attached to the province if it breaks
+        const brokenRegion = isBreached ? province.region : null;
         const newOpponentProvinces = opponent.provinces.map((p, i) =>
           i !== provinceIndex ? p : {
             ...p,
             broken: isBreached,
             card:   isBreached ? null : p.card,
             faceUp: isBreached ? false : p.faceUp,
+            region: isBreached ? null : p.region,
           },
         );
 
         // ── Battle casualties and honor ──────────────────────────────────────────
         let newPlayer   = { ...player };
-        let newOpponent = { ...opponent, provinces: newOpponentProvinces };
+        let newOpponent = {
+          ...opponent,
+          provinces: newOpponentProvinces,
+          dynastyDiscard: brokenRegion
+            ? [...opponent.dynastyDiscard, { ...brokenRegion, location: 'dynastyDiscard' as ZoneId }]
+            : opponent.dynastyDiscard,
+        };
 
         if (isBreached) {
-          // Attackers win → defenders die honorably; attackers retreat home bowed
+          // Attackers win → defenders die; attackers retreat home bowed (Conqueror exempt)
           const defenderAttachments = defenders.flatMap(p => p.attachments);
+          const honorablyKilled  = defenders.filter(p => !p.dishonored);
+          const dishonorKilled   = defenders.filter(p => p.dishonored);
+          const defPhLoss = dishonorKilled.reduce(
+            (s, p) => s + Math.max(0, Number(p.card.personalHonor) || 0), 0,
+          );
           if (defenders.length > 0) {
-            const names = defenders.map(p => p.card.name).join(', ');
+            const names = defenders.map(p => p.card.name + (p.dishonored ? ' ☠' : '')).join(', ');
             pushLog(`Defenders killed in battle: ${names}`, 'battle', 'system');
+          }
+          if (defPhLoss > 0) {
+            pushLog(`Opponent loses ${defPhLoss} Honor (dishonorably dead)`, 'honor', 'opponent');
           }
           const honorGain = defenders.length * 2;
           if (honorGain > 0) {
             pushLog(`You gain ${honorGain} Honor (${defenders.length} kill${defenders.length !== 1 ? 's' : ''})`, 'honor', 'player');
           }
-          // Attackers bow and return home
+          if (isBreached && brokenRegion) {
+            pushLog(`Region ${brokenRegion.card.name} discarded (province broken)`, 'other', 'system');
+          }
+          // Attackers return home — Conqueror units do not bow
           newPlayer = {
             ...newPlayer,
             familyHonor: newPlayer.familyHonor + honorGain,
-            personalitiesHome: player.personalitiesHome.map(p =>
-              assignedIds.includes(p.instanceId) ? { ...p, bowed: true } : p,
-            ),
+            personalitiesHome: player.personalitiesHome.map(p => {
+              if (!assignedIds.includes(p.instanceId)) return p;
+              return { ...p, bowed: isConquerorUnit(p) ? p.bowed : true };
+            }),
           };
-          // Defenders die: removed from home, stripped of attachments, added to honorablyDead
+          // Defenders die — dishonored → dishonorablelyDead + PH loss; others → honorablyDead
           newOpponent = {
             ...newOpponent,
+            familyHonor: newOpponent.familyHonor - defPhLoss,
             personalitiesHome: opponent.personalitiesHome.filter(p => !defenderIds.includes(p.instanceId)),
             honorablyDead: [
               ...opponent.honorablyDead,
-              ...defenders.map(p => ({ ...p, attachments: [] })),
+              ...honorablyKilled.map(p => ({ ...p, attachments: [] })),
+            ],
+            dishonorablelyDead: [
+              ...opponent.dishonorablelyDead,
+              ...dishonorKilled.map(p => ({ ...p, attachments: [] })),
             ],
             fateDiscard: [...opponent.fateDiscard, ...defenderAttachments],
           };
         } else {
-          // Defenders win → attackers die honorably; defenders stay home
+          // Defenders win → attackers die; defenders stay home
           const attackerAttachments = attackers.flatMap(p => p.attachments);
+          const honorablyKilled  = attackers.filter(p => !p.dishonored);
+          const dishonorKilled   = attackers.filter(p => p.dishonored);
+          const atkPhLoss = dishonorKilled.reduce(
+            (s, p) => s + Math.max(0, Number(p.card.personalHonor) || 0), 0,
+          );
           if (attackers.length > 0) {
-            const names = attackers.map(p => p.card.name).join(', ');
+            const names = attackers.map(p => p.card.name + (p.dishonored ? ' ☠' : '')).join(', ');
             pushLog(`Attackers killed in battle: ${names}`, 'battle', 'system');
+          }
+          if (atkPhLoss > 0) {
+            pushLog(`You lose ${atkPhLoss} Honor (dishonorably dead)`, 'honor', 'player');
           }
           const honorGain = attackers.length * 2;
           if (honorGain > 0) {
             pushLog(`Opponent gains ${honorGain} Honor (${attackers.length} kill${attackers.length !== 1 ? 's' : ''})`, 'honor', 'opponent');
           }
-          // Attackers die: removed from home, stripped of attachments, added to honorablyDead
+          // Attackers die — dishonored → dishonorablelyDead + PH loss; others → honorablyDead
           newPlayer = {
             ...newPlayer,
+            familyHonor: newPlayer.familyHonor - atkPhLoss,
             personalitiesHome: player.personalitiesHome.filter(p => !assignedIds.includes(p.instanceId)),
             honorablyDead: [
               ...player.honorablyDead,
-              ...attackers.map(p => ({ ...p, attachments: [] })),
+              ...honorablyKilled.map(p => ({ ...p, attachments: [] })),
+            ],
+            dishonorablelyDead: [
+              ...player.dishonorablelyDead,
+              ...dishonorKilled.map(p => ({ ...p, attachments: [] })),
             ],
             fateDiscard: [...player.fateDiscard, ...attackerAttachments],
           };
@@ -1152,18 +1272,22 @@ export const useGameStore = create<GameStore>((set, get) => {
   },
 
   endAttackPhase: () => {
-    const { player, battleAssignments } = get();
+    const { player, opponent, battleAssignments } = get();
     const assignedIds = battleAssignments.map(a => a.instanceId);
-    const newPersonalitiesHome = player.personalitiesHome.map(p =>
-      assignedIds.includes(p.instanceId) ? { ...p, bowed: true } : p
-    );
-    pushLog('Attack Phase ended — all attackers return home bowed', 'phase', 'system');
+    // Conqueror units don't bow; also clear all tempForceBonus on both sides
+    const newPersonalitiesHome = player.personalitiesHome.map(p => {
+      const bowed = assignedIds.includes(p.instanceId) && !isConquerorUnit(p) ? true : p.bowed;
+      return { ...p, bowed, tempForceBonus: 0 };
+    });
+    const newOpponentHome = opponent.personalitiesHome.map(p => ({ ...p, tempForceBonus: 0 }));
+    pushLog('Attack Phase ended — unresolved attackers return home', 'phase', 'system');
     set({
       turnPhase: 'dynasty',
       battleStage: null,
       battleAssignments: [],
       defenderAssignments: [],
-      player: { ...player, personalitiesHome: newPersonalitiesHome },
+      player:   { ...player,   personalitiesHome: newPersonalitiesHome },
+      opponent: { ...opponent, personalitiesHome: newOpponentHome },
     });
   },
 
@@ -1173,5 +1297,238 @@ export const useGameStore = create<GameStore>((set, get) => {
     const cardName = get().opponent.personalitiesHome.find(p => p.instanceId === instanceId)?.card.name ?? 'personality';
     pushLog(`Opponent assigned ${cardName} to defend Province ${provinceIndex + 1}`, 'other', 'opponent');
     set({ defenderAssignments: [...filtered, { instanceId, provinceIndex }] });
+  },
+
+  applyBattleKeyword: (sourceId, targetId, type, value) => {
+    const { player, opponent } = get();
+    const src = player.personalitiesHome.find(p => p.instanceId === sourceId);
+    const tgt = opponent.personalitiesHome.find(p => p.instanceId === targetId);
+    if (!src || !tgt) return;
+
+    const typeLabel = type === 'fear' ? 'Fear' : type === 'melee' ? 'Melee Attack' : 'Ranged Attack';
+
+    // Follower shield: any attached follower whose effective Force ≤ value must be
+    // targeted before the personality. Bowed/unbowed state is irrelevant here —
+    // bowing removes the follower's contribution to army totals, not its Force stat.
+    const shieldFollower = tgt.attachments.find(att =>
+      att.card.type === 'follower' && calcFollowerForce(att) <= value,
+    );
+
+    if (shieldFollower) {
+      // Target the follower
+      if (type === 'fear') {
+        pushLog(
+          `${src.card.name} Fear ${value} → bowed ${shieldFollower.card.name} (follower shield)`,
+          'battle', 'player',
+        );
+        set({
+          opponent: {
+            ...opponent,
+            personalitiesHome: opponent.personalitiesHome.map(p =>
+              p.instanceId !== targetId ? p : {
+                ...p,
+                attachments: p.attachments.map(att =>
+                  att.instanceId !== shieldFollower.instanceId ? att : { ...att, bowed: true },
+                ),
+              },
+            ),
+          },
+        });
+      } else {
+        // Melee / Ranged — kill the follower
+        pushLog(
+          `${src.card.name} ${typeLabel} ${value} → killed ${shieldFollower.card.name} (follower shield)`,
+          'battle', 'player',
+        );
+        set({
+          opponent: {
+            ...opponent,
+            personalitiesHome: opponent.personalitiesHome.map(p =>
+              p.instanceId !== targetId ? p : {
+                ...p,
+                attachments: p.attachments.filter(att => att.instanceId !== shieldFollower.instanceId),
+              },
+            ),
+            fateDiscard: [
+              { ...shieldFollower, location: 'fateDiscard' as ZoneId },
+              ...opponent.fateDiscard,
+            ],
+          },
+        });
+      }
+    } else {
+      // No follower shield — target the personality itself
+      const tgtForce = Math.max(0, Number(tgt.card.force) || 0);
+      if (tgtForce > value) {
+        pushLog(
+          `${tgt.card.name} has Force ${tgtForce} > ${value} — not a valid ${typeLabel} target`,
+          'battle', 'system',
+        );
+        return;
+      }
+      if (type === 'fear') {
+        pushLog(`${src.card.name} Fear ${value} → bowed ${tgt.card.name}`, 'battle', 'player');
+        set({
+          opponent: {
+            ...opponent,
+            personalitiesHome: opponent.personalitiesHome.map(p =>
+              p.instanceId !== targetId ? p : { ...p, bowed: true },
+            ),
+          },
+        });
+      } else {
+        // Melee / Ranged — kill the personality
+        const attachments = tgt.attachments;
+        const isDishonored = tgt.dishonored;
+        const phLoss = isDishonored ? Math.max(0, Number(tgt.card.personalHonor) || 0) : 0;
+        pushLog(
+          `${src.card.name} ${typeLabel} ${value} → killed ${tgt.card.name}${isDishonored ? ' ☠' : ''}`,
+          'battle', 'player',
+        );
+        pushLog(`You gain 2 Honor for killing ${tgt.card.name}`, 'honor', 'player');
+        if (phLoss > 0) {
+          pushLog(`Opponent loses ${phLoss} Honor (${tgt.card.name} dishonorably dead)`, 'honor', 'opponent');
+        }
+        set({
+          player: { ...player, familyHonor: player.familyHonor + 2 },
+          opponent: {
+            ...opponent,
+            familyHonor: opponent.familyHonor - phLoss,
+            personalitiesHome: opponent.personalitiesHome.filter(p => p.instanceId !== targetId),
+            honorablyDead: isDishonored
+              ? opponent.honorablyDead
+              : [{ ...tgt, attachments: [] }, ...opponent.honorablyDead],
+            dishonorablelyDead: isDishonored
+              ? [{ ...tgt, attachments: [] }, ...opponent.dishonorablelyDead]
+              : opponent.dishonorablelyDead,
+            fateDiscard: [...attachments, ...opponent.fateDiscard],
+          },
+        });
+      }
+    }
+  },
+
+  activateTactician: (personalityId, fateCardInstanceId) => {
+    const { player } = get();
+    const pers = player.personalitiesHome.find(p => p.instanceId === personalityId);
+    const card = player.hand.find(c => c.instanceId === fateCardInstanceId);
+    if (!pers || !card) return;
+
+    const focusVal = Math.max(0, Number(card.card.focus) || 0);
+    pushLog(
+      `${pers.card.name} Tactician — discarded ${card.card.name} (Focus ${focusVal}) for +${focusVal}F this battle`,
+      'battle', 'player',
+    );
+    set({
+      player: {
+        ...player,
+        hand: player.hand.filter(c => c.instanceId !== fateCardInstanceId),
+        fateDiscard: [{ ...card, location: 'fateDiscard' as ZoneId }, ...player.fateDiscard],
+        personalitiesHome: player.personalitiesHome.map(p =>
+          p.instanceId !== personalityId ? p : {
+            ...p,
+            tempForceBonus: p.tempForceBonus + focusVal,
+          },
+        ),
+      },
+    });
+  },
+
+  reserveRecruit: (provinceIndex, sourcePersonalityId) => {
+    const { player, battleStage, battleWindowPriority, currentBattlefield, battleAssignments } = get();
+
+    if (battleStage !== 'battleWindow' && battleStage !== 'engage') return;
+    if (battleWindowPriority !== 'player') return;
+
+    // Once per turn per source personality
+    if (player.abilitiesUsed.includes(sourcePersonalityId)) {
+      pushLog('Reserve already used this turn by this personality', 'recruit', 'player');
+      return;
+    }
+
+    const province = player.provinces[provinceIndex];
+    if (!province || !province.faceUp || !province.card || province.broken) return;
+
+    const inst = province.card;
+    const cost = Math.max(0, Number(inst.card.cost) || 0);
+    if (player.goldPool < cost) {
+      pushLog(
+        `Cannot Reserve recruit ${inst.card.name} — need ${cost}g (have ${player.goldPool}g)`,
+        'recruit', 'player',
+      );
+      return;
+    }
+
+    const isHolding = inst.card.type === 'holding';
+    const isPersonality = inst.card.type === 'personality';
+
+    // Singular check
+    if (isPersonality) {
+      const isSingular = inst.card.keywords.some(k => k.toLowerCase().trim() === 'singular');
+      if (isSingular && player.personalitiesHome.some(p => p.card.id === inst.card.id)) {
+        pushLog(`Cannot Reserve recruit ${inst.card.name} — Singular (already in play)`, 'recruit', 'player');
+        return;
+      }
+    }
+
+    // Refill province face-down
+    const [nextCard = null, ...restDynasty] = player.dynastyDeck;
+    const newProvinceCard: CardInstance | null = nextCard
+      ? { ...nextCard, location: `province${provinceIndex}` as ZoneId, faceUp: false, bowed: false }
+      : null;
+
+    const recruited: CardInstance = {
+      ...inst,
+      location: isHolding ? 'holdingsInPlay' as ZoneId : 'personalitiesHome' as ZoneId,
+      bowed: isHolding,
+    };
+
+    const srcName = player.personalitiesHome.find(p => p.instanceId === sourcePersonalityId)?.card.name ?? 'personality';
+    pushLog(`${srcName} Reserve — recruited ${inst.card.name} for ${cost}g`, 'recruit', 'player');
+
+    // Auto-assign recruited personality to current battlefield
+    const newBattleAssignments =
+      isPersonality && currentBattlefield !== null
+        ? [...battleAssignments, { instanceId: recruited.instanceId, provinceIndex: currentBattlefield }]
+        : battleAssignments;
+
+    set({
+      battleAssignments: newBattleAssignments,
+      player: {
+        ...player,
+        provinces: player.provinces.map((p, i) =>
+          i !== provinceIndex ? p : { ...p, card: newProvinceCard, faceUp: false },
+        ),
+        dynastyDeck: restDynasty,
+        personalitiesHome: isPersonality
+          ? [...player.personalitiesHome, recruited]
+          : player.personalitiesHome,
+        holdingsInPlay: isHolding
+          ? [...player.holdingsInPlay, recruited]
+          : player.holdingsInPlay,
+        goldPool: 0,
+        abilitiesUsed: [...player.abilitiesUsed, sourcePersonalityId],
+      },
+    });
+  },
+
+  dishonorPersonality: (instanceId, target) => {
+    const side = get()[target];
+    const pers = side.personalitiesHome.find(p => p.instanceId === instanceId);
+    if (!pers) return;
+
+    const nowDishonored = !pers.dishonored;
+    pushLog(
+      `${target === 'player' ? 'Your' : "Opponent's"} ${pers.card.name} is ${nowDishonored ? 'dishonored' : 'restored (honor restored)'}`,
+      'honor', target,
+    );
+    set({
+      [target]: {
+        ...side,
+        personalitiesHome: side.personalitiesHome.map(p =>
+          p.instanceId !== instanceId ? p : { ...p, dishonored: nowDishonored },
+        ),
+      },
+    });
   },
 });});
