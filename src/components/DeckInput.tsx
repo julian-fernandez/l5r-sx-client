@@ -191,6 +191,20 @@ export function DeckInput({ onLoad }: Props) {
                 </div>
               )}
 
+              {/* Deckbuilding violations (Loyal, Unique) */}
+              {parsed.violations.length > 0 && (
+                <div className="zone p-3 border-amber-900/60 bg-amber-950/20">
+                  <p className="text-[10px] text-amber-400 font-semibold uppercase tracking-wide mb-1.5">
+                    ⚠ Deck Warnings ({parsed.violations.length})
+                  </p>
+                  <ul className="space-y-0.5">
+                    {parsed.violations.map((v, i) => (
+                      <li key={i} className="text-[10px] text-amber-300/80">• {v}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
               {/* Missing cards */}
               {parsed.missing.length > 0 && (
                 <div className="zone p-3 border-red-900/60">

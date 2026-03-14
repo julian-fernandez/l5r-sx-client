@@ -1,8 +1,10 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useMemo } from 'react';
 import type { CardInstance, NormalizedCard, PlayerState } from '../types/cards';
 import { useGameStore, type TurnPhase } from '../store/gameStore';
-import { isCavalryUnit } from '../engine/gameActions';
+import { isCavalryUnit, calcFollowerForce } from '../engine/gameActions';
+import type { BattleKeywordType } from '../engine/gameActions';
 import { getValidAttachTargets } from './CardResolutionOverlay';
+import { ManualResolutionOverlay } from './ManualResolutionOverlay';
 import { GameRow } from './GameRow';
 import { InPlayRow } from './InPlayRow';
 import { CardPreview } from './CardPreview';
@@ -18,6 +20,18 @@ interface PlayState {
   instance: CardInstance;
   /** null = attachment that still needs a target; 'none' = no target needed (strategies) */
   targetId: string | null;
+  /**
+   * When true, uses ManualResolutionOverlay instead of CardResolutionOverlay.
+   * Both players must confirm before the card resolves.
+   */
+  manual?: boolean;
+}
+
+/** State for a pending Fear / Melee / Ranged battle keyword — waiting for a target click */
+interface BattleTargetMode {
+  sourceId: string;
+  type: BattleKeywordType;
+  value: number;
 }
 
 interface Props {
@@ -50,11 +64,22 @@ interface DeckBrowserState {
 }
 
 export function Board({ player, opponent, activePlayer, onReset }: Props) {
-  const [preview, setPreview]         = useState<PreviewState | null>(null);
-  const [modal, setModal]             = useState<NormalizedCard | null>(null);
-  const [deckBrowser, setDeckBrowser] = useState<DeckBrowserState | null>(null);
-  const [openPanel, setOpenPanel]     = useState<'actions' | 'log' | null>(null);
-  const [playState, setPlayState]     = useState<PlayState | null>(null);
+  const [preview, setPreview]               = useState<PreviewState | null>(null);
+  const [modal, setModal]                   = useState<NormalizedCard | null>(null);
+  const [deckBrowser, setDeckBrowser]       = useState<DeckBrowserState | null>(null);
+  const [openPanel, setOpenPanel]           = useState<'actions' | 'log' | null>(null);
+  const [playState, setPlayState]           = useState<PlayState | null>(null);
+  /** Fear/Melee/Ranged targeting: waiting for the player to click an opponent personality */
+  const [battleTargetMode, setBattleTargetMode] = useState<BattleTargetMode | null>(null);
+  /** Tactician mode: waiting for the player to pick a Fate card from hand */
+  const [tacticianPersonalityId, setTacticianPersonalityId] = useState<string | null>(null);
+  /** Reserve mode: waiting for the player to pick a province to recruit from */
+  const [reserveSourceId, setReserveSourceId] = useState<string | null>(null);
+  /**
+   * Manual resolution for in-play card abilities (personalities, holdings).
+   * No zone change happens automatically — effect is resolved verbally.
+   */
+  const [manualAbilityCard, setManualAbilityCard] = useState<CardInstance | null>(null);
 
   const togglePanel = (panel: 'actions' | 'log') =>
     setOpenPanel(p => (p === panel ? null : panel));
@@ -140,12 +165,32 @@ export function Board({ player, opponent, activePlayer, onReset }: Props) {
     return () => clearTimeout(timer);
   }, [battleStage, defenderAssignments.length, battleAssignments, opponent.personalitiesHome, assignDefender]);
 
-  const playFromHand = useGameStore(s => s.playFromHand);
+  const playFromHand       = useGameStore(s => s.playFromHand);
+  const applyBattleKeyword = useGameStore(s => s.applyBattleKeyword);
+  const activateTactician  = useGameStore(s => s.activateTactician);
+  const reserveRecruit     = useGameStore(s => s.reserveRecruit);
+  const gameResult         = useGameStore(s => s.gameResult);
 
   // ── Card play handlers ───────────────────────────────────────────────────
   const handlePlayCard = useCallback((instance: CardInstance) => {
     const isAttachment = ['item', 'follower', 'spell'].includes(instance.card.type);
     setPlayState({ instance, targetId: isAttachment ? null : 'none' });
+    setPreview(null);
+  }, []);
+
+  /** Opens the manual resolution overlay for a hand card (bypasses timing/ability checks). */
+  const handleManualPlay = useCallback((instance: CardInstance) => {
+    const isAttachment = ['item', 'follower', 'spell'].includes(instance.card.type);
+    setPlayState({ instance, targetId: isAttachment ? null : 'none', manual: true });
+    setPreview(null);
+  }, []);
+
+  /**
+   * Opens the manual resolution overlay for an in-play card ability.
+   * No automatic zone changes occur — effect is resolved verbally.
+   */
+  const handleManualAbility = useCallback((instance: CardInstance) => {
+    setManualAbilityCard(instance);
     setPreview(null);
   }, []);
 
@@ -179,6 +224,49 @@ export function Board({ player, opponent, activePlayer, onReset }: Props) {
     if (battleStage === 'engage')       validTimings.add('engage');
     if (battleStage === 'battleWindow') validTimings.add('battle');
   }
+
+  // ── Battle keyword targeting ──────────────────────────────────────────────
+  // Compute which opponent personalities are valid targets for the active keyword
+  const validBattleTargets = useMemo(() => {
+    if (!battleTargetMode) return new Set<string>();
+    const { value } = battleTargetMode;
+    const targets = new Set<string>();
+    for (const p of opponent.personalitiesHome) {
+      // Valid if: has any follower whose effective Force ≤ value (bowed state irrelevant),
+      // OR the personality's own Force ≤ value.
+      const hasShieldFollower = p.attachments.some(
+        att => att.card.type === 'follower' && calcFollowerForce(att) <= value,
+      );
+      const persForce = Math.max(0, Number(p.card.force) || 0);
+      if (hasShieldFollower || persForce <= value) targets.add(p.instanceId);
+    }
+    return targets;
+  }, [battleTargetMode, opponent.personalitiesHome]);
+
+  const handleBattleKeywordTrigger = useCallback(
+    (sourceId: string, type: BattleKeywordType | 'tactician', value: number) => {
+      if (type === 'tactician') {
+        setTacticianPersonalityId(sourceId);
+      } else if (type === 'reserve') {
+        setReserveSourceId(sourceId);
+      } else {
+        setBattleTargetMode({ sourceId, type, value });
+      }
+    },
+    [],
+  );
+
+  const handleSelectBattleTarget = useCallback((targetId: string) => {
+    if (!battleTargetMode) return;
+    applyBattleKeyword(battleTargetMode.sourceId, targetId, battleTargetMode.type, battleTargetMode.value);
+    setBattleTargetMode(null);
+  }, [battleTargetMode, applyBattleKeyword]);
+
+  const handleTacticianCardPick = useCallback((cardInstanceId: string) => {
+    if (!tacticianPersonalityId) return;
+    activateTactician(tacticianPersonalityId, cardInstanceId);
+    setTacticianPersonalityId(null);
+  }, [tacticianPersonalityId, activateTactician]);
 
   const handleOpenDeckBrowser = useCallback((cards: CardInstance[], title: string) => {
     setPreview(null);
@@ -272,6 +360,8 @@ export function Board({ player, opponent, activePlayer, onReset }: Props) {
             isOpponent
             turnPhase={turnPhase}
             defenderAssignments={defenderAssignments}
+            validBattleTargets={validBattleTargets}
+            onSelectBattleTarget={handleSelectBattleTarget}
             {...pp}
           />
 
@@ -304,6 +394,8 @@ export function Board({ player, opponent, activePlayer, onReset }: Props) {
             validAttachTargets={validAttachTargets}
             onSelectAttachTarget={handleSelectAttachTarget}
             selectedAttachTarget={playState?.targetId ?? null}
+            onBattleKeywordTrigger={handleBattleKeywordTrigger}
+            onManualAbility={handleManualAbility}
             {...pp}
           />
 
@@ -312,14 +404,79 @@ export function Board({ player, opponent, activePlayer, onReset }: Props) {
             player={player}
             onOpenDeckBrowser={handleOpenDeckBrowser}
             onPlayCard={handlePlayCard}
+            onManualPlay={handleManualPlay}
             {...pp}
           />
 
         </div>
       </div>
 
-      {/* ── Card resolution overlay ─────────────────────────────────── */}
-      {playState && (
+      {/* ── Battle targeting hint banner ─────────────────────────────── */}
+      {battleTargetMode && (
+        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-50 flex items-center gap-3
+                        bg-orange-950/90 border border-orange-600 rounded-xl px-4 py-2 shadow-2xl text-sm">
+          <span className="text-orange-300 font-semibold">
+            {battleTargetMode.type === 'fear'
+              ? `Fear ${battleTargetMode.value}`
+              : battleTargetMode.type === 'melee'
+              ? `Melee Attack ${battleTargetMode.value}`
+              : `Ranged Attack ${battleTargetMode.value}`}
+          </span>
+          <span className="text-orange-400/70 text-xs">— click an opponent personality to target</span>
+          <button
+            onClick={() => setBattleTargetMode(null)}
+            className="text-[10px] text-orange-500 hover:text-orange-300 border border-orange-700 rounded px-2 py-0.5"
+          >
+            Cancel
+          </button>
+        </div>
+      )}
+
+      {/* ── Tactician card picker ─────────────────────────────────────── */}
+      {tacticianPersonalityId && (
+        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-50
+                        bg-board-zone border border-violet-600 rounded-xl shadow-2xl"
+             style={{ minWidth: 320, maxWidth: 560 }}>
+          <div className="flex items-center justify-between px-4 py-2 border-b border-board-border">
+            <span className="text-[11px] font-bold text-violet-300">
+              Tactician — pick a Fate card to discard for its Focus Value
+            </span>
+            <button
+              onClick={() => setTacticianPersonalityId(null)}
+              className="text-[10px] text-gray-500 hover:text-gray-300"
+            >
+              ✕
+            </button>
+          </div>
+          <div className="flex gap-2 p-3 overflow-x-auto">
+            {player.hand.length === 0 ? (
+              <span className="text-gray-600 text-xs self-center px-2">No cards in hand</span>
+            ) : player.hand.map(inst => (
+              <button
+                key={inst.instanceId}
+                onClick={() => handleTacticianCardPick(inst.instanceId)}
+                className="flex-shrink-0 flex flex-col items-center gap-1 group"
+                title={`${inst.card.name} — Focus ${inst.card.focus}`}
+              >
+                <div className="relative rounded overflow-hidden border border-board-border group-hover:border-violet-500 transition-colors"
+                     style={{ width: '7vh', height: '10vh' }}>
+                  <img
+                    src={inst.card.imagePath}
+                    alt={inst.card.name}
+                    className="w-full h-full object-cover"
+                    onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                  />
+                </div>
+                <span className="text-[8px] text-violet-300 font-bold">Focus {inst.card.focus}</span>
+                <span className="text-[7px] text-gray-500 max-w-[7vh] truncate">{inst.card.name}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* ── Card resolution overlay (automated) ────────────────────── */}
+      {playState && !playState.manual && (
         <CardResolutionOverlay
           instance={playState.instance}
           targetId={playState.targetId === 'none' ? null : playState.targetId}
@@ -328,6 +485,33 @@ export function Board({ player, opponent, activePlayer, onReset }: Props) {
           goldPool={player.goldPool}
           onConfirm={handleConfirmPlay}
           onCancel={handleCancelPlay}
+        />
+      )}
+
+      {/* ── Manual resolution overlay (hand card) ───────────────────── */}
+      {playState?.manual && (playState.targetId === 'none' || playState.targetId) && (
+        <ManualResolutionOverlay
+          instance={playState.instance}
+          targetPersonality={
+            playState.targetId && playState.targetId !== 'none'
+              ? player.personalitiesHome.find(p => p.instanceId === playState.targetId) ?? null
+              : null
+          }
+          goldPool={player.goldPool}
+          onBothResolved={() => {
+            handleConfirmPlay(undefined);
+          }}
+          onCancel={handleCancelPlay}
+        />
+      )}
+
+      {/* ── Manual resolution overlay (in-play ability) ─────────────── */}
+      {manualAbilityCard && (
+        <ManualResolutionOverlay
+          instance={manualAbilityCard}
+          resolveLabel="Done — mark as resolved"
+          onBothResolved={() => setManualAbilityCard(null)}
+          onCancel={() => setManualAbilityCard(null)}
         />
       )}
 
@@ -370,6 +554,98 @@ export function Board({ player, opponent, activePlayer, onReset }: Props) {
           onPreviewClear={handlePreviewClear}
           onModal={handleModal}
         />
+      )}
+
+      {/* ── Reserve Province Picker ───────────────────────────────────────── */}
+      {reserveSourceId && (
+        <div className="fixed bottom-4 right-4 z-50 bg-[#0d1325] border border-violet-600/60 rounded-xl shadow-2xl p-4"
+          style={{ width: 340 }}>
+          <div className="flex items-center justify-between mb-3">
+            <div>
+              <span className="text-sm font-bold text-violet-300">Reserve</span>
+              <span className="text-xs text-gray-500 ml-2">— pick a province to recruit from</span>
+            </div>
+            <button onClick={() => setReserveSourceId(null)}
+              className="text-gray-600 hover:text-gray-300 text-sm leading-none">✕</button>
+          </div>
+          <div className="flex gap-2 flex-wrap">
+            {player.provinces
+              .filter(p => p.faceUp && p.card && !p.broken)
+              .map(prov => {
+                const cost = Math.max(0, Number(prov.card!.card.cost) || 0);
+                const canAfford = player.goldPool >= cost;
+                return (
+                  <button
+                    key={prov.index}
+                    disabled={!canAfford}
+                    onClick={() => {
+                      reserveRecruit(prov.index, reserveSourceId);
+                      setReserveSourceId(null);
+                    }}
+                    className={[
+                      'flex flex-col items-center gap-1 p-2 rounded-lg border text-xs transition-all',
+                      canAfford
+                        ? 'border-violet-500/60 bg-violet-900/20 text-white hover:bg-violet-800/30 cursor-pointer'
+                        : 'border-gray-700/40 bg-gray-900/20 text-gray-600 cursor-not-allowed',
+                    ].join(' ')}
+                    title={canAfford ? `Recruit for ${cost}g` : `Need ${cost}g (have ${player.goldPool}g)`}
+                  >
+                    <span className="font-semibold text-[10px] max-w-[70px] text-center leading-tight truncate">
+                      {prov.card!.card.name}
+                    </span>
+                    <span className={`text-[9px] font-bold ${canAfford ? 'text-amber-400' : 'text-gray-600'}`}>
+                      {cost}g
+                    </span>
+                    <span className="text-[8px] text-gray-600 capitalize">{prov.card!.card.type}</span>
+                  </button>
+                );
+              })
+            }
+          </div>
+          {player.provinces.every(p => !p.faceUp || !p.card || p.broken) && (
+            <p className="text-[10px] text-gray-600 text-center mt-2">No face-up province cards available</p>
+          )}
+          {player.goldPool === 0 && (
+            <p className="text-[9px] text-gray-700 mt-2 text-center">Bow holdings to build gold pool first</p>
+          )}
+        </div>
+      )}
+
+      {/* ── Game Result Screen ────────────────────────────────────────────── */}
+      {gameResult && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/85 backdrop-blur-sm">
+          <div className="text-center space-y-6 px-8 py-10 bg-[#0b1020] border border-gray-700/60 rounded-2xl shadow-2xl max-w-md">
+            {gameResult.winner === 'player' ? (
+              <>
+                <div className="text-5xl">🏆</div>
+                <h1 className="text-4xl font-bold text-amber-300 tracking-wide">Victory!</h1>
+                <p className="text-gray-400 text-sm">
+                  {gameResult.reason === 'honor'
+                    ? 'You achieved Honor Victory — 40 or more Family Honor at the start of your turn.'
+                    : 'Your opponent has been reduced to Dishonor.'}
+                </p>
+              </>
+            ) : (
+              <>
+                <div className="text-5xl">💀</div>
+                <h1 className="text-4xl font-bold text-red-400 tracking-wide">Defeat</h1>
+                <p className="text-gray-400 text-sm">
+                  {gameResult.reason === 'dishonor'
+                    ? 'Your Family Honor has reached −20. You have been dishonored.'
+                    : 'Your opponent achieved Honor Victory.'}
+                </p>
+              </>
+            )}
+            <div className="pt-2">
+              <button
+                onClick={onReset}
+                className="px-6 py-2.5 bg-amber-600 hover:bg-amber-500 text-black font-bold rounded-lg text-sm transition-colors"
+              >
+                New Game
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </>
   );
