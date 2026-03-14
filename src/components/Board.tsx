@@ -165,11 +165,12 @@ export function Board({ player, opponent, activePlayer, onReset }: Props) {
     return () => clearTimeout(timer);
   }, [battleStage, defenderAssignments.length, battleAssignments, opponent.personalitiesHome, assignDefender]);
 
-  const playFromHand       = useGameStore(s => s.playFromHand);
-  const applyBattleKeyword = useGameStore(s => s.applyBattleKeyword);
-  const activateTactician  = useGameStore(s => s.activateTactician);
-  const reserveRecruit     = useGameStore(s => s.reserveRecruit);
-  const gameResult         = useGameStore(s => s.gameResult);
+  const playFromHand        = useGameStore(s => s.playFromHand);
+  const applyBattleKeyword  = useGameStore(s => s.applyBattleKeyword);
+  const activateTactician   = useGameStore(s => s.activateTactician);
+  const reserveRecruit      = useGameStore(s => s.reserveRecruit);
+  const playRingToPermanent = useGameStore(s => s.playRingToPermanent);
+  const gameResult          = useGameStore(s => s.gameResult);
 
   // ── Card play handlers ───────────────────────────────────────────────────
   const handlePlayCard = useCallback((instance: CardInstance) => {
@@ -193,6 +194,11 @@ export function Board({ player, opponent, activePlayer, onReset }: Props) {
     setManualAbilityCard(instance);
     setPreview(null);
   }, []);
+
+  const handlePlayRingPermanent = useCallback((instance: CardInstance) => {
+    playRingToPermanent(instance.instanceId);
+    setPreview(null);
+  }, [playRingToPermanent]);
 
   const handleConfirmPlay = useCallback((abilityText?: string) => {
     if (!playState) return;
@@ -405,6 +411,7 @@ export function Board({ player, opponent, activePlayer, onReset }: Props) {
             onOpenDeckBrowser={handleOpenDeckBrowser}
             onPlayCard={handlePlayCard}
             onManualPlay={handleManualPlay}
+            onPlayRingPermanent={handlePlayRingPermanent}
             {...pp}
           />
 
@@ -617,21 +624,25 @@ export function Board({ player, opponent, activePlayer, onReset }: Props) {
           <div className="text-center space-y-6 px-8 py-10 bg-[#0b1020] border border-gray-700/60 rounded-2xl shadow-2xl max-w-md">
             {gameResult.winner === 'player' ? (
               <>
-                <div className="text-5xl">🏆</div>
+                <div className="text-5xl">{gameResult.reason === 'enlightenment' ? '⬡' : '🏆'}</div>
                 <h1 className="text-4xl font-bold text-amber-300 tracking-wide">Victory!</h1>
                 <p className="text-gray-400 text-sm">
                   {gameResult.reason === 'honor'
                     ? 'You achieved Honor Victory — 40 or more Family Honor at the start of your turn.'
+                    : gameResult.reason === 'enlightenment'
+                    ? 'You achieved Enlightenment Victory — five Rings with different elemental keywords in play.'
                     : 'Your opponent has been reduced to Dishonor.'}
                 </p>
               </>
             ) : (
               <>
-                <div className="text-5xl">💀</div>
+                <div className="text-5xl">{gameResult.reason === 'enlightenment' ? '⬡' : '💀'}</div>
                 <h1 className="text-4xl font-bold text-red-400 tracking-wide">Defeat</h1>
                 <p className="text-gray-400 text-sm">
                   {gameResult.reason === 'dishonor'
                     ? 'Your Family Honor has reached −20. You have been dishonored.'
+                    : gameResult.reason === 'enlightenment'
+                    ? 'Your opponent achieved Enlightenment Victory.'
                     : 'Your opponent achieved Honor Victory.'}
                 </p>
               </>

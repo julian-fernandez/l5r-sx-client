@@ -3,9 +3,10 @@
  * the current player this turn. Opened via the header toggle button.
  *
  * Currently hard-codes detection for:
- *  - Cycle          (first-turn only)
- *  - Border Keep    (bow → draw 2 fate cards; remember to discard 1 before end)
- *  - Bamboo Harvesters (bow → search fate deck)
+ *  - Cycle          (first-turn only, enabled by Border Keep's first-turn ability)
+ *  - Border Keep    (once-per-game: recycle any number of province cards)
+ *  - Bamboo Harvesters: produces 2 Gold when bowed — handled on the board
+ *    (double-click to bow); no separate Actions Panel entry needed.
  *
  * Extend `buildActions()` as more abilities are added.
  */
@@ -28,36 +29,29 @@ interface ActionEntry {
   onActivate: () => void;
 }
 
-// ── Ability name matchers ─────────────────────────────────────────────────────
-
-const isBorderKeep      = (name: string) => /border keep/i.test(name);
-const isBambooHarvesters = (name: string) => /bamboo harvesters/i.test(name);
-
 // ── Component ─────────────────────────────────────────────────────────────────
 
-export function ActionsPanel({ player, onClose, onOpenDeckBrowser }: Props) {
+export function ActionsPanel({ player, onClose, onOpenDeckBrowser: _onOpenDeckBrowser }: Props) {
   const turnNumber        = useGameStore(s => s.turnNumber);
   const cyclingActive     = useGameStore(s => s.cyclingActive);
   const startCycling      = useGameStore(s => s.startCycling);
-  const bowCard           = useGameStore(s => s.bowCard);
-  const drawFateCard      = useGameStore(s => s.drawFateCard);
-  const useHoldingAbility = useGameStore(s => s.useHoldingAbility);
+  const borderKeepCycle   = useGameStore(s => s.borderKeepCycle);
 
   const target = 'player';
 
   const actions: ActionEntry[] = [];
 
-  // ── Cycle (turn 1 only) ───────────────────────────────────────────────────
+  // ── Cycle (turn 1 only — Border Keep's first-turn ability) ───────────────
   if (turnNumber === 1 && !player.cyclingDone) {
     const inProgress = cyclingActive === 'player';
     actions.push({
       id: 'cycle',
-      label: 'Cycle',
-      source: 'Turn 1 rule',
+      label: 'Cycle Provinces',
+      source: 'Turn 1 rule (Border Keep)',
       description:
-        'Declare a Cycle: click face-up province cards to select which ones to replace, ' +
-        'then confirm. Each selected card moves to the bottom of the Dynasty deck and ' +
-        'a new card is drawn face-up. May cycle 0–4 provinces.',
+        'Click face-up province cards to mark them for cycling, then confirm. ' +
+        'Selected cards move to the bottom of the Dynasty deck and provinces refill face-up. ' +
+        'You may cycle 0–4 provinces. Once per game.',
       available: !inProgress,
       disabledReason: inProgress ? 'Cycling in progress — select provinces near the board' : undefined,
       onActivate: () => {
@@ -70,55 +64,32 @@ export function ActionsPanel({ player, onClose, onOpenDeckBrowser }: Props) {
   // ── Holding abilities ─────────────────────────────────────────────────────
   for (const holding of player.holdingsInPlay) {
     const name = holding.card.name;
-    const used = player.abilitiesUsed.includes(holding.instanceId);
 
-    if (isBorderKeep(name)) {
+    if (/border keep/i.test(name)) {
+      const usedOncePerGame = player.oncePerGameAbilitiesUsed.includes(holding.instanceId);
+      // Show the once-per-game cycle ability only after turn 1 (turn 1 already has Cycle rule above).
+      // Still show on turn 1 in case the player wants to use BK directly.
       actions.push({
-        id: `${holding.instanceId}-ability`,
-        label: 'Border Keep',
+        id: `${holding.instanceId}-bk-cycle`,
+        label: 'Border Keep — Recycle Provinces',
         source: name,
         description:
-          'Bow Border Keep: draw 2 cards from the top of your Fate deck. ' +
-          'You must discard 1 card from your hand before your turn ends ' +
-          '(the hand-limit enforcement at End Phase covers this).',
-        available: !used && !holding.bowed,
-        disabledReason: used
-          ? 'Already used this turn'
-          : holding.bowed
-          ? 'Border Keep is bowed'
-          : undefined,
+          'Limited, once per game: put any number of face-up province cards at the bottom of ' +
+          'your Dynasty deck, then refill those provinces face-up. ' +
+          'Border Keep also produces 2 Gold when bowed (double-click on the board).',
+        available: !usedOncePerGame,
+        disabledReason: usedOncePerGame ? 'Already used this game' : undefined,
         onActivate: () => {
-          bowCard(holding.instanceId, target);
-          drawFateCard(target);
-          drawFateCard(target);
-          useHoldingAbility(holding.instanceId, target);
-          // Stay open so the player can see the newly drawn cards in context
-        },
-      });
-    }
-
-    if (isBambooHarvesters(name)) {
-      actions.push({
-        id: `${holding.instanceId}-ability`,
-        label: 'Bamboo Harvesters',
-        source: name,
-        description:
-          'Bow Bamboo Harvesters: search your Fate deck for a card. ' +
-          'Opens the full Fate deck browser — find the card you need.',
-        available: !used && !holding.bowed,
-        disabledReason: used
-          ? 'Already used this turn'
-          : holding.bowed
-          ? 'Bamboo Harvesters is bowed'
-          : undefined,
-        onActivate: () => {
-          bowCard(holding.instanceId, target);
-          useHoldingAbility(holding.instanceId, target);
-          onOpenDeckBrowser(player.fateDeck, `Bamboo Harvesters — Search Fate Deck`);
+          borderKeepCycle(holding.instanceId);
           onClose();
         },
       });
     }
+
+    // Bamboo Harvesters: only produces 2 Gold when bowed.
+    // Double-click the card on the board to bow it and add gold to the pool.
+    // Card text: "This card will not straighten before your second turn."
+    // No separate ability entry here — it's just a holding you bow for gold.
   }
 
   const available   = actions.filter(a => a.available);

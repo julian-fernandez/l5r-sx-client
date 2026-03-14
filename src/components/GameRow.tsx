@@ -40,6 +40,11 @@ interface Props extends SharedPreviewProps {
   onPlayCard?: (instance: CardInstance) => void;
   /** Called when the player selects "Resolve manually" on a hand card. */
   onManualPlay?: (instance: CardInstance) => void;
+  /**
+   * Called when the player chooses "Put ring into play" for a ring card in hand.
+   * The caller must verify the ring's entry condition has been met before calling this.
+   */
+  onPlayRingPermanent?: (instance: CardInstance) => void;
 }
 
 // All card heights in vh so they scale with the viewport.
@@ -61,6 +66,7 @@ export function GameRow({
   attackerPersonalities = [],
   onPlayCard,
   onManualPlay,
+  onPlayRingPermanent,
 }: Props) {
   const pp = { onPreview, onPreviewMove, onPreviewClear, onModal };
   const target = isOpponent ? 'opponent' : 'player';
@@ -221,6 +227,7 @@ export function GameRow({
           onDiscard={(id) => discardHandCard(id, target)}
           onPlayCard={!isOpponent ? onPlayCard : undefined}
           onManualPlay={!isOpponent ? onManualPlay : undefined}
+          onPlayRingPermanent={!isOpponent ? onPlayRingPermanent : undefined}
           canPlay={(inst) => canPlayFromHand(
             inst.card, turnPhase, battleStage, activePlayer, priority, battleWindowPriority,
           )}
@@ -414,7 +421,7 @@ export function GameRow({
  * Hovering a card lifts it above the others (z-index + translate-y).
  */
 function HandFan({
-  cards, cardH, isOpponent, mustDiscard, onDiscard, onPlayCard, onManualPlay, canPlay, pp,
+  cards, cardH, isOpponent, mustDiscard, onDiscard, onPlayCard, onManualPlay, onPlayRingPermanent, canPlay, pp,
 }: {
   cards: CardInstance[];
   cardH: string;
@@ -423,6 +430,7 @@ function HandFan({
   onDiscard: (id: string) => void;
   onPlayCard?: (inst: CardInstance) => void;
   onManualPlay?: (inst: CardInstance) => void;
+  onPlayRingPermanent?: (inst: CardInstance) => void;
   canPlay?: (inst: CardInstance) => boolean;
   pp: SharedPreviewProps;
 }) {
@@ -455,10 +463,12 @@ function HandFan({
     const isAttachment = ['item', 'follower', 'spell'].includes(inst.card.type);
     const cost = Math.max(0, Number(inst.card.cost) || 0);
 
+    const isRing = inst.card.type === 'ring';
+
     if (onPlayCard && playable) {
       items.push({
         label: isAttachment ? `Equip ${inst.card.name}` : `Play ${inst.card.name}`,
-        sublabel: cost > 0 ? `${cost}g` : (isAttachment ? 'select target →' : 'resolve immediately'),
+        sublabel: cost > 0 ? `${cost}g` : (isAttachment ? 'select target →' : isRing ? 'discard for ability' : 'resolve immediately'),
         onClick: () => onPlayCard(inst),
         variant: 'primary',
       });
@@ -468,6 +478,16 @@ function HandFan({
         sublabel: 'Not your action window',
         onClick: () => {},
         disabled: true,
+      });
+    }
+
+    // Ring-specific: enter play as a permanent (condition must be met manually)
+    if (isRing && onPlayRingPermanent) {
+      items.push({
+        label: '⬡ Put into play (condition met)',
+        sublabel: 'Enters Celestials & Events zone — counts toward Enlightenment',
+        onClick: () => onPlayRingPermanent(inst),
+        variant: 'primary',
       });
     }
 

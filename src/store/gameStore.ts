@@ -81,7 +81,7 @@ interface GameStore {
    * Set when the game ends. null = game is still in progress.
    * reason: 'honor' = Honor victory (40+); 'dishonor' = Dishonor defeat (≤ −20).
    */
-  gameResult: { winner: 'player' | 'opponent'; reason: 'honor' | 'dishonor' } | null;
+  gameResult: { winner: 'player' | 'opponent'; reason: 'honor' | 'dishonor' | 'enlightenment' } | null;
 
   setCatalogLoaded: (loaded: boolean) => void;
   setStrongholdOverride: (o: { honor: number; gold: number; provinceStrength: number } | null) => void;
@@ -229,6 +229,18 @@ interface GameStore {
    */
   reserveRecruit: (provinceIndex: number, sourcePersonalityId: string) => void;
   /**
+   * Border Keep Limited (once per game): recycle any number of face-up province cards
+   * to the bottom of the dynasty deck and refill them face-up immediately.
+   * Tracked in `oncePerGameAbilitiesUsed` so it persists across turns.
+   */
+  borderKeepCycle: (holdingInstanceId: string) => void;
+  /**
+   * Play a ring card from hand into `specialsInPlay` as a permanent.
+   * Call when the ring's condition for entering play has been met.
+   * Checks for Enlightenment victory (5 rings with different elemental keywords).
+   */
+  playRingToPermanent: (instanceId: string) => void;
+  /**
    * Toggle the dishonored state of a personality.
    * Dishonored personalities that die become Dishonorably Dead; their controller
    * loses Family Honor equal to the personality's printed Personal Honor.
@@ -259,6 +271,7 @@ function emptyPlayer(): PlayerState {
     proclaimUsed: false,
     cyclingDone: false,
     abilitiesUsed: [],
+    oncePerGameAbilitiesUsed: [],
     honorablyDead: [],
     dishonorablelyDead: [],
   };
@@ -332,6 +345,7 @@ function buildPlayerState(
       proclaimUsed: false,
       cyclingDone: false,
       abilitiesUsed: [],
+      oncePerGameAbilitiesUsed: [],
       honorablyDead: [],
       dishonorablelyDead: [],
     };
@@ -814,12 +828,20 @@ export const useGameStore = create<GameStore>((set, get) => {
 
       const newActive: 'player' | 'opponent' = activePlayer === 'player' ? 'opponent' : 'player';
       const incoming = st[newActive];
+      const newTurnNumber = st.turnNumber + 1;
 
       // Straighten: unbow everything, reset per-turn flags, clear battle bonuses
+      // Bamboo Harvesters cannot straighten before the incoming player's second turn.
+      // Global turn 2 is always the second player's FIRST turn (regardless of who goes first/second),
+      // so BH stays bowed whenever newTurnNumber === 2.
       const straightened: PlayerState = {
         ...incoming,
         strongholdBowed: false,
-        holdingsInPlay:     incoming.holdingsInPlay.map(c => ({ ...c, bowed: false })),
+        holdingsInPlay: incoming.holdingsInPlay.map(c => {
+          const isBH = /bamboo harvesters/i.test(c.card.name);
+          if (isBH && newTurnNumber === 2) return c; // stays bowed — first turn for this player
+          return { ...c, bowed: false };
+        }),
         personalitiesHome:  incoming.personalitiesHome.map(c => ({ ...c, bowed: false, tempForceBonus: 0 })),
         specialsInPlay:     incoming.specialsInPlay.map(c => ({ ...c, bowed: false })),
         proclaimUsed: false,
@@ -1510,6 +1532,61 @@ export const useGameStore = create<GameStore>((set, get) => {
         abilitiesUsed: [...player.abilitiesUsed, sourcePersonalityId],
       },
     });
+  },
+
+  borderKeepCycle: (holdingInstanceId) => {
+    const { player } = get();
+    const bk = player.holdingsInPlay.find(h => h.instanceId === holdingInstanceId);
+    if (!bk) return;
+    if (player.oncePerGameAbilitiesUsed.includes(holdingInstanceId)) {
+      pushLog('Border Keep: once-per-game ability already used this game', 'other', 'player');
+      return;
+    }
+    pushLog('Border Keep: activated once-per-game province cycling', 'other', 'player');
+    set({
+      cyclingActive: 'player',
+      player: {
+        ...player,
+        oncePerGameAbilitiesUsed: [...player.oncePerGameAbilitiesUsed, holdingInstanceId],
+      },
+    });
+  },
+
+  playRingToPermanent: (instanceId) => {
+    const { player } = get();
+    const card = player.hand.find(c => c.instanceId === instanceId);
+    if (!card || card.card.type !== 'ring') return;
+
+    const ringInPlay: CardInstance = { ...card, location: 'specialsInPlay' as ZoneId, bowed: false };
+    const newSpecials = [...player.specialsInPlay, ringInPlay];
+
+    pushLog(`You put ${card.card.name} into play`, 'other', 'player');
+
+    const newPlayer: PlayerState = {
+      ...player,
+      hand: player.hand.filter(c => c.instanceId !== instanceId),
+      specialsInPlay: newSpecials,
+    };
+
+    // Enlightenment: 5 rings with 5 distinct elemental keywords in specialsInPlay
+    const ELEMENTS = new Set(['air', 'earth', 'fire', 'water', 'void']);
+    const ringElements = new Set<string>();
+    for (const c of newSpecials) {
+      if (c.card.type !== 'ring') continue;
+      // False Rings and rings that say "does not count towards" are excluded
+      if (/does not count towards.*enlightenment/i.test(c.card.text)) continue;
+      for (const kw of c.card.keywords) {
+        const lc = kw.toLowerCase().trim();
+        if (ELEMENTS.has(lc)) ringElements.add(lc);
+      }
+    }
+    if (ringElements.size >= 5) {
+      pushLog('You control five Rings with different elemental keywords — Enlightenment Victory!', 'honor', 'system');
+      set({ player: newPlayer, gameResult: { winner: 'player', reason: 'enlightenment' } });
+      return;
+    }
+
+    set({ player: newPlayer });
   },
 
   dishonorPersonality: (instanceId, target) => {

@@ -197,6 +197,11 @@ export interface PlayerState {
    */
   abilitiesUsed: string[];
   /**
+   * Instance IDs of cards whose once-per-GAME activated ability has been used.
+   * Never reset; persists for the entire game.
+   */
+  oncePerGameAbilitiesUsed: string[];
+  /**
    * Personalities killed honorably in battle.
    * Distinct from the discard pile — many card effects specifically reference dead personalities.
    */
