@@ -38,6 +38,8 @@ interface Props extends SharedPreviewProps {
   attackerPersonalities?: CardInstance[];
   /** Called when the player right-clicks a hand card and selects "Play". */
   onPlayCard?: (instance: CardInstance) => void;
+  /** Called when the player selects "Resolve manually" on a hand card. */
+  onManualPlay?: (instance: CardInstance) => void;
 }
 
 // All card heights in vh so they scale with the viewport.
@@ -58,6 +60,7 @@ export function GameRow({
   incomingAttacks = [],
   attackerPersonalities = [],
   onPlayCard,
+  onManualPlay,
 }: Props) {
   const pp = { onPreview, onPreviewMove, onPreviewClear, onModal };
   const target = isOpponent ? 'opponent' : 'player';
@@ -217,6 +220,7 @@ export function GameRow({
           mustDiscard={mustDiscard}
           onDiscard={(id) => discardHandCard(id, target)}
           onPlayCard={!isOpponent ? onPlayCard : undefined}
+          onManualPlay={!isOpponent ? onManualPlay : undefined}
           canPlay={(inst) => canPlayFromHand(
             inst.card, turnPhase, battleStage, activePlayer, priority, battleWindowPriority,
           )}
@@ -410,7 +414,7 @@ export function GameRow({
  * Hovering a card lifts it above the others (z-index + translate-y).
  */
 function HandFan({
-  cards, cardH, isOpponent, mustDiscard, onDiscard, onPlayCard, canPlay, pp,
+  cards, cardH, isOpponent, mustDiscard, onDiscard, onPlayCard, onManualPlay, canPlay, pp,
 }: {
   cards: CardInstance[];
   cardH: string;
@@ -418,6 +422,7 @@ function HandFan({
   mustDiscard: boolean;
   onDiscard: (id: string) => void;
   onPlayCard?: (inst: CardInstance) => void;
+  onManualPlay?: (inst: CardInstance) => void;
   canPlay?: (inst: CardInstance) => boolean;
   pp: SharedPreviewProps;
 }) {
@@ -466,6 +471,14 @@ function HandFan({
       });
     }
 
+    if (onManualPlay) {
+      items.push({ separator: true });
+      items.push({
+        label: '⚙ Resolve manually',
+        sublabel: 'Both players confirm verbally',
+        onClick: () => onManualPlay(inst),
+      });
+    }
     items.push({ separator: true });
     items.push({ label: 'View card', onClick: () => pp.onModal?.(inst.card) });
     setCtxMenu({ items, x: e.clientX, y: e.clientY });
@@ -527,14 +540,6 @@ function HandFan({
   );
 }
 
-function FaceDownCard({ h }: { h: string }) {
-  return (
-    <div
-      className="flex-shrink-0 rounded-md bg-gradient-to-br from-slate-700 to-slate-800 border border-slate-600 shadow"
-      style={{ height: h, width: 'auto', aspectRatio: '2.5/3.5' }}
-    />
-  );
-}
 
 function ProvinceSlot({ province, strength, forceHidden, h, isCycling, cycleSelected, onToggleCycleSelect, onProvinceRightClick, underAttack, attackForce, ...pp }: {
   province: Province; strength: number; forceHidden?: boolean; h: string;
@@ -582,30 +587,43 @@ function ProvinceSlot({ province, strength, forceHidden, h, isCycling, cycleSele
           </span>
         )}
       </div>
-      {province.card
-        ? <GameCard
-            instance={province.card}
-            faceDown={faceDown}
-            className={[
-              'flex-1',
-              canCycleThis && cycleSelected  ? 'ring-2 ring-emerald-400 rounded-lg cursor-pointer' : '',
-              canCycleThis && !cycleSelected ? 'ring-1 ring-gray-600/60 rounded-lg cursor-pointer' : '',
-            ].join(' ')}
-            style={{ height: '100%', width: 'auto', aspectRatio: '2.5/3.5' }}
-            onClick={canCycleThis ? onToggleCycleSelect : undefined}
-            onContextMenu={canRecruit && !isCycling
-              ? (e) => onProvinceRightClick?.(province, e)
-              : undefined
-            }
-            {...pp}
-          />
-        : <div
-            className="card-slot-empty flex-1"
-            style={{ width: `calc(${h} * 2.5 / 3.5)`, aspectRatio: '2.5/3.5' }}
+      <div className="relative flex-1" style={{ width: `calc(${h} * 2.5 / 3.5)` }}>
+        {province.card
+          ? <GameCard
+              instance={province.card}
+              faceDown={faceDown}
+              className={[
+                'w-full h-full',
+                canCycleThis && cycleSelected  ? 'ring-2 ring-emerald-400 rounded-lg cursor-pointer' : '',
+                canCycleThis && !cycleSelected ? 'ring-1 ring-gray-600/60 rounded-lg cursor-pointer' : '',
+              ].join(' ')}
+              style={{ height: '100%', width: '100%', aspectRatio: '2.5/3.5' }}
+              onClick={canCycleThis ? onToggleCycleSelect : undefined}
+              onContextMenu={canRecruit && !isCycling
+                ? (e) => onProvinceRightClick?.(province, e)
+                : undefined
+              }
+              {...pp}
+            />
+          : <div
+              className="card-slot-empty w-full h-full"
+              style={{ aspectRatio: '2.5/3.5' }}
+            >
+              <span className="text-gray-700 text-[9px]">—</span>
+            </div>
+        }
+        {/* Region attached to this province */}
+        {province.region && (
+          <div
+            className="absolute bottom-0.5 inset-x-0 flex justify-center pointer-events-none"
+            title={`Region: ${province.region.card.name}`}
           >
-            <span className="text-gray-700 text-[9px]">—</span>
+            <span className="text-[6px] font-bold bg-teal-800/90 text-teal-200 px-1 py-px rounded leading-tight shadow max-w-full truncate">
+              ⬡ {province.region.card.name}
+            </span>
           </div>
-      }
+        )}
+      </div>
     </div>
   );
 }

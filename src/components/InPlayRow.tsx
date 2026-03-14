@@ -12,7 +12,8 @@ import type { BattleAssignment, CardInstance, NormalizedCard, Province } from '.
 import { BATTLEFIELD_STYLES } from '../types/cards';
 import type { TurnPhase } from '../store/gameStore';
 import { useGameStore } from '../store/gameStore';
-import { isCavalryUnit } from '../engine/gameActions';
+import { isCavalryUnit, getBattleKeywordAbilities } from '../engine/gameActions';
+import type { BattleKeywordType } from '../engine/gameActions';
 import { GameCard } from './GameCard';
 import { CardImage } from './CardImage';
 import { ContextMenu, type ContextMenuEntry } from './ContextMenu';
@@ -46,6 +47,23 @@ interface Props extends SharedPreviewProps {
   onSelectAttachTarget?: (instanceId: string) => void;
   /** The currently selected attach target instanceId (shown with a green ring). */
   selectedAttachTarget?: string | null;
+  /**
+   * Battle keyword targeting: personalities in this set are valid targets for
+   * a Fear / Melee Attack / Ranged Attack action. Used on the opponent side.
+   */
+  validBattleTargets?: Set<string>;
+  /** Called when the player clicks a valid battle target on the opponent side. */
+  onSelectBattleTarget?: (instanceId: string) => void;
+  /**
+   * Player's personality right-clicked during a battle window — triggers a
+   * battle keyword ability (Fear, Melee, Ranged, Tactician).
+   */
+  onBattleKeywordTrigger?: (sourceId: string, type: BattleKeywordType | 'tactician', value: number) => void;
+  /**
+   * Called when player selects "Resolve manually" on any in-play card.
+   * Opens ManualResolutionOverlay so both players can confirm the effect verbally.
+   */
+  onManualAbility?: (instance: CardInstance) => void;
 }
 
 // vh-based so cards scale with viewport height
@@ -59,52 +77,123 @@ export function InPlayRow({
   turnPhase,
   battleAssignments = [], defenderAssignments = [], opponentProvinces = [],
   validAttachTargets, onSelectAttachTarget, selectedAttachTarget,
+  validBattleTargets, onSelectBattleTarget,
+  onBattleKeywordTrigger,
+  onManualAbility,
   onPreview, onPreviewMove, onPreviewClear, onModal,
 }: Props) {
   const pp = { onPreview, onPreviewMove, onPreviewClear, onModal };
   const prefix = isOpponent ? 'Opponent ' : '';
   const target = isOpponent ? 'opponent' : 'player';
 
-  const bowCard             = useGameStore(s => s.bowCard);
-  const assignToBattlefield = useGameStore(s => s.assignToBattlefield);
-  const unassignFromBattle  = useGameStore(s => s.unassignFromBattle);
-  const battleStage         = useGameStore(s => s.battleStage);
-
+  const bowCard               = useGameStore(s => s.bowCard);
+  const assignToBattlefield   = useGameStore(s => s.assignToBattlefield);
+  const unassignFromBattle    = useGameStore(s => s.unassignFromBattle);
+  const battleStage           = useGameStore(s => s.battleStage);
+  const battleWindowPriority  = useGameStore(s => s.battleWindowPriority);
+  const dishonorPersonality   = useGameStore(s => s.dishonorPersonality);
 
   const [ctxMenu, setCtxMenu] = useState<{ items: ContextMenuEntry[]; x: number; y: number } | null>(null);
 
-  const isAttackPhase  = turnPhase === 'attack';
-  const isAssigning    = isAttackPhase && battleStage === 'assigning';
-  const isTargeting    = !!validAttachTargets && validAttachTargets.size > 0;
+  const isAttackPhase    = turnPhase === 'attack';
+  const isAssigning      = isAttackPhase && battleStage === 'assigning';
+  const isBattleWindow   = isAttackPhase && (battleStage === 'battleWindow' || battleStage === 'engage');
+  const isTargeting      = !!validAttachTargets && validAttachTargets.size > 0;
+  const isBattleTargeting = !!validBattleTargets && validBattleTargets.size > 0;
 
   const handlePersonalityContextMenu = (inst: CardInstance, e: React.MouseEvent) => {
-    if (isOpponent || !isAssigning) return;
     e.preventDefault();
-    const currentAssignment = battleAssignments.find(a => a.instanceId === inst.instanceId);
     const items: ContextMenuEntry[] = [];
 
-    opponentProvinces.forEach(prov => {
-      if (prov.broken) return;
-      const isCurrentTarget = currentAssignment?.provinceIndex === prov.index;
-      items.push({
-        label: isCurrentTarget ? `✓ Province ${prov.index + 1}` : `Attack Province ${prov.index + 1}`,
-        sublabel: `Str ${prov.strength}`,
-        onClick: () => assignToBattlefield(inst.instanceId, prov.index),
-        disabled: isCurrentTarget,
-        variant: 'primary',
-      });
-    });
+    // ── Player's side only: Assignment & keyword abilities ─────────────────
+    if (!isOpponent) {
+      // Assignment mode
+      if (isAssigning) {
+        const currentAssignment = battleAssignments.find(a => a.instanceId === inst.instanceId);
+        opponentProvinces.forEach(prov => {
+          if (prov.broken) return;
+          const isCurrentTarget = currentAssignment?.provinceIndex === prov.index;
+          items.push({
+            label: isCurrentTarget ? `✓ Province ${prov.index + 1}` : `Attack Province ${prov.index + 1}`,
+            sublabel: `Str ${prov.strength}`,
+            onClick: () => assignToBattlefield(inst.instanceId, prov.index),
+            disabled: isCurrentTarget,
+            variant: 'primary',
+          });
+        });
+        if (currentAssignment !== undefined) {
+          if (items.length > 0) items.push({ separator: true });
+          items.push({
+            label: 'Retreat (remove from battle)',
+            onClick: () => unassignFromBattle(inst.instanceId),
+            variant: 'danger',
+          });
+        }
+      }
 
-    if (currentAssignment !== undefined) {
-      if (items.length > 0) items.push({ separator: true });
-      items.push({
-        label: 'Retreat (remove from battle)',
-        onClick: () => unassignFromBattle(inst.instanceId),
-        variant: 'danger',
-      });
+      // Battle/Engage window — keyword abilities
+      if (isBattleWindow && battleWindowPriority === 'player') {
+        const abilities = getBattleKeywordAbilities(inst.card);
+        if (abilities.length > 0) {
+          if (items.length > 0) items.push({ separator: true });
+          for (const ab of abilities) {
+            items.push({
+              label: ab.label,
+              sublabel:
+                ab.type === 'tactician' ? 'Discard a Fate card for Force bonus' :
+                ab.type === 'reserve'   ? 'Recruit from a province to this battlefield' :
+                `${ab.type === 'fear' ? 'Bow' : 'Kill'} enemy unit with Force ≤ ${ab.value}`,
+              onClick: () => onBattleKeywordTrigger?.(inst.instanceId, ab.type, ab.value),
+              variant: 'primary',
+            });
+          }
+        }
+      }
+
+      // Resolve manually
+      if (onManualAbility) {
+        if (items.length > 0) items.push({ separator: true });
+        items.push({
+          label: '⚙ Resolve manually',
+          sublabel: 'Both players confirm verbally',
+          onClick: () => onManualAbility(inst),
+        });
+      }
     }
 
-    if (items.length > 0) setCtxMenu({ items, x: e.clientX, y: e.clientY });
+    // ── Dishonor toggle (both sides) ──────────────────────────────────────
+    if (items.length > 0) items.push({ separator: true });
+    items.push({
+      label: inst.dishonored ? '☀ Restore Honor' : '☠ Dishonor',
+      sublabel: inst.dishonored
+        ? 'Remove dishonored status'
+        : 'Mark as dishonored — if killed, goes to Dishonorably Dead',
+      onClick: () => dishonorPersonality(inst.instanceId, target),
+      variant: inst.dishonored ? undefined : 'danger',
+    });
+
+    // ── Always: view card ────────────────────────────────────────────────
+    items.push({ separator: true });
+    items.push({ label: 'View card', onClick: () => onModal?.(inst.card) });
+
+    setCtxMenu({ items, x: e.clientX, y: e.clientY });
+  };
+
+  // Holdings right-click: manual resolution + view card
+  const handleHoldingContextMenu = (inst: CardInstance, e: React.MouseEvent) => {
+    if (isOpponent) return;
+    e.preventDefault();
+    const items: ContextMenuEntry[] = [];
+    if (onManualAbility) {
+      items.push({
+        label: '⚙ Resolve manually',
+        sublabel: 'Both players confirm verbally',
+        onClick: () => onManualAbility(inst),
+      });
+      items.push({ separator: true });
+    }
+    items.push({ label: 'View card', onClick: () => onModal?.(inst.card) });
+    setCtxMenu({ items, x: e.clientX, y: e.clientY });
   };
 
   return (
@@ -118,6 +207,7 @@ export function InPlayRow({
               <GameCard key={inst.instanceId} instance={inst} faceDown={false}
                 style={{ height: HOLDING_H, width: 'auto', aspectRatio: '2.5/3.5', flexShrink: 0 }}
                 onDoubleClick={() => bowCard(inst.instanceId, target)}
+                onContextMenu={!isOpponent ? (e) => handleHoldingContextMenu(inst, e) : undefined}
                 {...pp}
               />
             ))
@@ -134,6 +224,10 @@ export function InPlayRow({
             <span className="text-[8px] text-red-400 font-semibold animate-pulse">
               Right-click to assign
             </span>
+          ) : isBattleTargeting && isOpponent ? (
+            <span className="text-[8px] text-orange-400 font-semibold animate-pulse">
+              Click target
+            </span>
           ) : isTargeting && !isOpponent ? (
             <span className="text-[8px] text-sky-400 font-semibold animate-pulse">
               Click target personality
@@ -144,10 +238,11 @@ export function InPlayRow({
         {personalitiesHome.length === 0
           ? <Empty text="No personalities in play" />
           : personalitiesHome.map(inst => {
-              const assignment        = battleAssignments.find(a => a.instanceId === inst.instanceId);
+              const assignment         = battleAssignments.find(a => a.instanceId === inst.instanceId);
               const defenderAssignment = defenderAssignments.find(d => d.instanceId === inst.instanceId);
-              const isValidTarget     = validAttachTargets?.has(inst.instanceId) ?? false;
-              const isSelected        = selectedAttachTarget === inst.instanceId;
+              const isValidTarget      = validAttachTargets?.has(inst.instanceId) ?? false;
+              const isSelected         = selectedAttachTarget === inst.instanceId;
+              const isValidBattleTarget = validBattleTargets?.has(inst.instanceId) ?? false;
               return (
                 <PersonalityCard
                   key={inst.instanceId} instance={inst} h={PERSONALITY_H}
@@ -156,12 +251,18 @@ export function InPlayRow({
                   defenderAssignment={defenderAssignment}
                   isAssigning={isAssigning && !isOpponent}
                   onContextMenu={(e) => handlePersonalityContextMenu(inst, e)}
+                  isDishonored={inst.dishonored}
                   bowCard={bowCard}
                   target={target}
                   isValidTarget={isValidTarget}
                   isSelectedTarget={isSelected}
-                  onSelectTarget={isValidTarget ? () => onSelectAttachTarget?.(inst.instanceId) : undefined}
+                  onSelectTarget={isValidTarget
+                    ? () => onSelectAttachTarget?.(inst.instanceId)
+                    : isValidBattleTarget
+                    ? () => onSelectBattleTarget?.(inst.instanceId)
+                    : undefined}
                   showCavalryBadge={isAssigning && !isOpponent && isCavalryUnit(inst)}
+                  isValidBattleTarget={isValidBattleTarget}
                   {...pp}
                 />
               );
@@ -215,7 +316,7 @@ function PersonalityCard({
   onPreview, onPreviewMove, onPreviewClear, onModal,
   bowCard, target,
   isValidTarget, isSelectedTarget, onSelectTarget,
-  showCavalryBadge,
+  showCavalryBadge, isValidBattleTarget, isDishonored,
 }: {
   instance: CardInstance; h: string; onBow?: () => void;
   assignment?: BattleAssignment;
@@ -228,6 +329,8 @@ function PersonalityCard({
   isSelectedTarget?: boolean;
   onSelectTarget?: () => void;
   showCavalryBadge?: boolean;
+  isValidBattleTarget?: boolean;
+  isDishonored?: boolean;
 } & SharedPreviewProps) {
   const pp = { onPreview, onPreviewMove, onPreviewClear, onModal };
   const n   = instance.attachments.length;
@@ -298,14 +401,16 @@ function PersonalityCard({
           instance={instance}
           faceDown={false}
           className={[
-            isAssigning    ? 'cursor-context-menu' : '',
-            isValidTarget  ? 'ring-2 ring-sky-400 rounded-lg cursor-pointer animate-pulse' : '',
-            isSelectedTarget ? 'ring-2 ring-emerald-400 rounded-lg cursor-pointer' : '',
-            bf && !isValidTarget && !isSelectedTarget ? `ring-2 ${bf.ring} rounded-lg` : '',
+            isAssigning          ? 'cursor-context-menu' : '',
+            isValidBattleTarget  ? 'ring-2 ring-orange-400 rounded-lg cursor-pointer animate-pulse' : '',
+            isValidTarget        ? 'ring-2 ring-sky-400 rounded-lg cursor-pointer animate-pulse' : '',
+            isSelectedTarget     ? 'ring-2 ring-emerald-400 rounded-lg cursor-pointer' : '',
+            bf && !isValidTarget && !isSelectedTarget && !isValidBattleTarget
+              ? `ring-2 ${bf.ring} rounded-lg` : '',
           ].filter(Boolean).join(' ')}
           style={{ height: '100%', width: '100%' }}
           onClick={onSelectTarget}
-          onDoubleClick={!isAssigning && !isValidTarget ? onBow : undefined}
+          onDoubleClick={!isAssigning && !isValidTarget && !isValidBattleTarget ? onBow : undefined}
           onContextMenu={onContextMenu}
           {...pp}
         />
@@ -344,6 +449,44 @@ function PersonalityCard({
         >
           🛡P{defenderAssignment.provinceIndex + 1}
         </div>
+      )}
+
+      {/* ── Tactician Force bonus badge ── */}
+      {instance.tempForceBonus > 0 && (
+        <div
+          className="absolute -bottom-0.5 inset-x-0 flex justify-center pointer-events-none"
+          style={{ zIndex: n + 2 }}
+        >
+          <span
+            className="text-[7px] font-bold bg-violet-700 text-white px-1 py-px rounded leading-tight shadow"
+            title={`Tactician bonus: +${instance.tempForceBonus}F this battle`}
+          >
+            +{instance.tempForceBonus}F
+          </span>
+        </div>
+      )}
+
+      {/* ── Dishonored overlay + badge ── */}
+      {isDishonored && (
+        <>
+          {/* Red tint over the personality card */}
+          <div
+            className="absolute left-0 right-0 bg-red-900/30 rounded-lg pointer-events-none"
+            style={{ top: `${n * PEEK_VH}vh`, height: h, zIndex: n + 2 }}
+          />
+          {/* Dishonored badge */}
+          <div
+            className="absolute left-0 right-0 flex justify-center pointer-events-none"
+            style={{ top: `${n * PEEK_VH + 0.3}vh`, zIndex: n + 3 }}
+          >
+            <span
+              className="text-[7px] font-bold bg-red-800 text-white px-1 py-px rounded leading-tight shadow"
+              title="Dishonored — dies to Dishonorably Dead pile; controller loses PH Honor"
+            >
+              ☠ DISHON
+            </span>
+          </div>
+        </>
       )}
     </div>
   );
