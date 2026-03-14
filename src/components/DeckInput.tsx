@@ -9,6 +9,7 @@ const SAMPLE_DECK = UNICORN_TEST_DECK;
 
 interface Props {
   onLoad: (deck: ParsedDeck) => void;
+  onEnterMultiplayer?: () => void;
 }
 
 interface StrongholdStats {
@@ -17,7 +18,7 @@ interface StrongholdStats {
   provinceStrength: number;
 }
 
-export function DeckInput({ onLoad }: Props) {
+export function DeckInput({ onLoad, onEnterMultiplayer }: Props) {
   const catalogLoaded = useGameStore(s => s.catalogLoaded);
   const lastDeckText = useGameStore(s => s.lastDeckText);
   const setLastDeckText = useGameStore(s => s.setLastDeckText);
@@ -82,8 +83,17 @@ export function DeckInput({ onLoad }: Props) {
         <p className="text-sm text-gray-500">Solo proof of concept · Paste deck to begin</p>
       </div>
 
-      {/* Quick-start test game */}
+      {/* Quick-start test game + multiplayer */}
       <div className="flex flex-col items-center gap-1.5">
+        {onEnterMultiplayer && (
+          <button
+            onClick={onEnterMultiplayer}
+            disabled={!catalogLoaded}
+            className="px-5 py-2 bg-sky-700 hover:bg-sky-600 disabled:opacity-40 text-white font-bold rounded-lg text-sm transition-colors"
+          >
+            Multiplayer — Private Game
+          </button>
+        )}
         <button
           onClick={loadTestGame}
           disabled={!catalogLoaded}

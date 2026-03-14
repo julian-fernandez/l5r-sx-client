@@ -5,7 +5,7 @@ import type { BattleKeywordType } from '../engine/gameActions';
 import { parseDeck } from '../engine/deckParser';
 import { applyMidGameState, UNICORN_TEST_DECK, PHOENIX_TEST_DECK } from '../engine/testFixtures';
 
-type GamePhase = 'setup' | 'playing';
+type GamePhase = 'setup' | 'lobby' | 'playing';
 
 /**
  * The eight phases of a Samurai Extended turn (in order).
@@ -25,6 +25,10 @@ export type TurnPhase =
 interface GameStore {
   phase: GamePhase;
   catalogLoaded: boolean;
+  /** True when in a live networked game (vs. solo/goldfish). */
+  multiplayerMode: boolean;
+  /** This client's player index in the room (0 = first, 1 = second). null in solo mode. */
+  myPlayerIndex: 0 | 1 | null;
   player: PlayerState;
   opponent: PlayerState;
   /** Whose overall turn it is */
@@ -246,6 +250,25 @@ interface GameStore {
    * loses Family Honor equal to the personality's printed Personal Honor.
    */
   dishonorPersonality: (instanceId: string, target: 'player' | 'opponent') => void;
+
+  // ── Multiplayer ─────────────────────────────────────────────────────────────
+  /** Enter lobby phase (shows MultiplayerLobby component). */
+  enterLobby: () => void;
+  /**
+   * Initialize the game from server-provided state (multiplayer only).
+   * Both PlayerState blobs come from the server after game-ready is received.
+   */
+  loadFromServerState: (
+    ownState: PlayerState,
+    opponentState: PlayerState,
+    firstPlayerIndex: 0 | 1,
+    myPlayerIndex: 0 | 1,
+  ) => void;
+  /**
+   * Called when the server notifies us that the opponent drew a fate card.
+   * Increments opponent hand count; actual card is unknown.
+   */
+  applyOpponentDrew: () => void;
 }
 
 function emptyPlayer(): PlayerState {
@@ -436,6 +459,8 @@ export const useGameStore = create<GameStore>((set, get) => {
   return ({
   phase: 'setup',
   catalogLoaded: false,
+  multiplayerMode: false,
+  myPlayerIndex: null,
   player: emptyPlayer(),
   opponent: emptyPlayer(),
   activePlayer: 'player',
@@ -1605,6 +1630,53 @@ export const useGameStore = create<GameStore>((set, get) => {
         personalitiesHome: side.personalitiesHome.map(p =>
           p.instanceId !== instanceId ? p : { ...p, dishonored: nowDishonored },
         ),
+      },
+    });
+  },
+
+  // ── Multiplayer ─────────────────────────────────────────────────────────────
+
+  enterLobby: () => set({ phase: 'lobby', multiplayerMode: true }),
+
+  loadFromServerState: (ownState, opponentState, firstPlayerIndex, myPlayerIndex) => {
+    // In multiplayer, 'player' is always the local client regardless of index.
+    // firstPlayerIndex determines who gets activePlayer = 'player' first.
+    const activePlayer = firstPlayerIndex === myPlayerIndex ? 'player' : 'opponent';
+    set({
+      phase: 'playing',
+      multiplayerMode: true,
+      myPlayerIndex,
+      player: ownState,
+      opponent: opponentState,
+      activePlayer,
+      turnPhase: 'event',
+      priority: activePlayer,
+      consecutivePasses: 0,
+      turnNumber: 1,
+      gameLog: [],
+      gameResult: null,
+      battleAssignments: [],
+      defenderAssignments: [],
+      battleStage: null,
+      currentBattlefield: null,
+      battleWindowPriority: 'player',
+      battleWindowPasses: 0,
+      cyclingActive: null,
+    });
+  },
+
+  applyOpponentDrew: () => {
+    const { opponent } = get();
+    // We don't know which card; just add a placeholder to opponent hand count.
+    // The opponent's actual hand content is private — we only track length.
+    const fakeCard = opponent.fateDeck[0];
+    if (!fakeCard) return;
+    set({
+      opponent: {
+        ...opponent,
+        // Shift a placeholder from deck to hand (card is face-down = unknown)
+        hand: [...opponent.hand, { ...fakeCard, faceUp: false, location: 'hand' }],
+        fateDeck: opponent.fateDeck.slice(1),
       },
     });
   },

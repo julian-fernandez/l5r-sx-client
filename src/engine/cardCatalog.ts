@@ -142,6 +142,16 @@ export async function loadCatalog(): Promise<NormalizedCard[]> {
   return catalog;
 }
 
+/**
+ * Initialize the catalog from pre-loaded raw data.
+ * Used server-side where `fetch` is not available and the JSON is read from disk.
+ */
+export function loadCatalogFromData(raw: CardCatalogEntry[]): NormalizedCard[] {
+  catalog = raw.map(normalizeCard);
+  catalogByName = buildNameIndex(catalog);
+  return catalog;
+}
+
 function buildNameIndex(cards: NormalizedCard[]): Map<string, NormalizedCard[]> {
   const index = new Map<string, NormalizedCard[]>();
 

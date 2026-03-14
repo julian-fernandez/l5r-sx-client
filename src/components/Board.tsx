@@ -39,6 +39,10 @@ interface Props {
   opponent: PlayerState;
   activePlayer: 'player' | 'opponent';
   onReset: () => void;
+  /** True when in a live networked game. Adds a connection status indicator. */
+  multiplayerMode?: boolean;
+  /** Emits a SerializedAction to the server in multiplayer mode. */
+  sendAction?: (action: import('../../server/src/types').SerializedAction) => void;
 }
 
 const PHASE_LABELS: Record<TurnPhase, string> = {
@@ -63,7 +67,7 @@ interface DeckBrowserState {
   title: string;
 }
 
-export function Board({ player, opponent, activePlayer, onReset }: Props) {
+export function Board({ player, opponent, activePlayer, onReset, multiplayerMode = false, sendAction: _sendAction }: Props) {
   const [preview, setPreview]               = useState<PreviewState | null>(null);
   const [modal, setModal]                   = useState<NormalizedCard | null>(null);
   const [deckBrowser, setDeckBrowser]       = useState<DeckBrowserState | null>(null);
@@ -341,6 +345,11 @@ export function Board({ player, opponent, activePlayer, onReset }: Props) {
             <ActionsPanelToggle active={openPanel === 'actions'} onClick={() => togglePanel('actions')} />
             <LogPanelToggle     active={openPanel === 'log'}     onClick={() => togglePanel('log')} />
 
+            {multiplayerMode && (
+              <span className="text-[9px] font-bold text-sky-400 border border-sky-700/50 rounded px-1.5 py-0.5 bg-sky-950/30 tracking-wide">
+                ⬡ LIVE
+              </span>
+            )}
             <button onClick={onReset} className="btn-ghost text-[11px] py-0.5 px-2">← New Deck</button>
           </div>
         </header>
