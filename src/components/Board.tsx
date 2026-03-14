@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect } from 'react';
 import type { CardInstance, NormalizedCard, PlayerState } from '../types/cards';
 import { useGameStore, type TurnPhase } from '../store/gameStore';
+import { isCavalryUnit } from '../engine/gameActions';
 import { getValidAttachTargets } from './CardResolutionOverlay';
 import { GameRow } from './GameRow';
 import { InPlayRow } from './InPlayRow';
@@ -64,6 +65,8 @@ export function Board({ player, opponent, activePlayer, onReset }: Props) {
   const opponentAutoPass      = useGameStore(s => s.opponentAutoPass);
   const advancePhase          = useGameStore(s => s.advancePhase);
   const battleAssignments     = useGameStore(s => s.battleAssignments);
+  const defenderAssignments   = useGameStore(s => s.defenderAssignments);
+  const assignDefender        = useGameStore(s => s.assignDefender);
   const battleStage           = useGameStore(s => s.battleStage);
   const endAttackPhase        = useGameStore(s => s.endAttackPhase);
   const passBattlefieldAction = useGameStore(s => s.passBattlefieldAction);
@@ -109,6 +112,33 @@ export function Board({ player, opponent, activePlayer, onReset }: Props) {
     activePlayer, turnPhase, priority, battleStage, battleWindowPriority,
     advancePhase, opponentAutoPass, passPriority, endAttackPhase, passBattlefieldAction,
   ]);
+
+  // ── Auto-defender: when player commits attackers, opponent assigns defenders ─
+  // Fires when battleStage moves to 'resolving' and no defenders are yet assigned.
+  // Assignment order mirrors the CR: non-Cavalry defenders first, then Cavalry.
+  useEffect(() => {
+    if (battleStage !== 'resolving') return;
+    if (defenderAssignments.length > 0) return; // already assigned
+
+    const attackedProvinces = [...new Set(battleAssignments.map(a => a.provinceIndex))];
+    if (attackedProvinces.length === 0) return;
+
+    // Sort opponent personalities: non-Cavalry first, Cavalry last
+    const available = [...opponent.personalitiesHome]
+      .filter(p => !p.bowed) // bowed personalities cannot defend
+      .sort((a, b) => (isCavalryUnit(a) ? 1 : 0) - (isCavalryUnit(b) ? 1 : 0));
+
+    if (available.length === 0) return;
+
+    const timer = window.setTimeout(() => {
+      // Assign one defender per attacked province (as many as available)
+      for (let i = 0; i < attackedProvinces.length && i < available.length; i++) {
+        assignDefender(available[i].instanceId, attackedProvinces[i]);
+      }
+    }, 500);
+
+    return () => clearTimeout(timer);
+  }, [battleStage, defenderAssignments.length, battleAssignments, opponent.personalitiesHome, assignDefender]);
 
   const playFromHand = useGameStore(s => s.playFromHand);
 
@@ -241,6 +271,7 @@ export function Board({ player, opponent, activePlayer, onReset }: Props) {
             specialsInPlay={opponent.specialsInPlay}
             isOpponent
             turnPhase={turnPhase}
+            defenderAssignments={defenderAssignments}
             {...pp}
           />
 
@@ -248,8 +279,10 @@ export function Board({ player, opponent, activePlayer, onReset }: Props) {
           {turnPhase === 'attack' ? (
             <BattleStrip
               battleAssignments={battleAssignments}
+              defenderAssignments={defenderAssignments}
               battleStage={battleStage}
               playerPersonalities={player.personalitiesHome}
+              opponentPersonalities={opponent.personalitiesHome}
               opponentProvinces={opponent.provinces}
             />
           ) : (
@@ -292,6 +325,7 @@ export function Board({ player, opponent, activePlayer, onReset }: Props) {
           targetId={playState.targetId === 'none' ? null : playState.targetId}
           personalities={player.personalitiesHome}
           validTimings={validTimings}
+          goldPool={player.goldPool}
           onConfirm={handleConfirmPlay}
           onCancel={handleCancelPlay}
         />

@@ -33,6 +33,8 @@ interface Props extends SharedPreviewProps {
   turnPhase?: TurnPhase;
   /** Current battle assignments (player attacking opponent). */
   battleAssignments?: BattleAssignment[];
+  /** Defender assignments (opponent personalities defending provinces). */
+  defenderAssignments?: BattleAssignment[];
   /** Opponent's provinces — used to build assignment context menus. */
   opponentProvinces?: Province[];
   /**
@@ -55,7 +57,7 @@ export function InPlayRow({
   holdingsInPlay, personalitiesHome, specialsInPlay,
   isOpponent = false,
   turnPhase,
-  battleAssignments = [], opponentProvinces = [],
+  battleAssignments = [], defenderAssignments = [], opponentProvinces = [],
   validAttachTargets, onSelectAttachTarget, selectedAttachTarget,
   onPreview, onPreviewMove, onPreviewClear, onModal,
 }: Props) {
@@ -142,14 +144,16 @@ export function InPlayRow({
         {personalitiesHome.length === 0
           ? <Empty text="No personalities in play" />
           : personalitiesHome.map(inst => {
-              const assignment    = battleAssignments.find(a => a.instanceId === inst.instanceId);
-              const isValidTarget = validAttachTargets?.has(inst.instanceId) ?? false;
-              const isSelected    = selectedAttachTarget === inst.instanceId;
+              const assignment        = battleAssignments.find(a => a.instanceId === inst.instanceId);
+              const defenderAssignment = defenderAssignments.find(d => d.instanceId === inst.instanceId);
+              const isValidTarget     = validAttachTargets?.has(inst.instanceId) ?? false;
+              const isSelected        = selectedAttachTarget === inst.instanceId;
               return (
                 <PersonalityCard
                   key={inst.instanceId} instance={inst} h={PERSONALITY_H}
                   onBow={() => bowCard(inst.instanceId, target)}
                   assignment={assignment}
+                  defenderAssignment={defenderAssignment}
                   isAssigning={isAssigning && !isOpponent}
                   onContextMenu={(e) => handlePersonalityContextMenu(inst, e)}
                   bowCard={bowCard}
@@ -207,7 +211,7 @@ const ATTACH_ACCENT: Record<string, string> = {
 };
 
 function PersonalityCard({
-  instance, h, onBow, assignment, isAssigning, onContextMenu,
+  instance, h, onBow, assignment, defenderAssignment, isAssigning, onContextMenu,
   onPreview, onPreviewMove, onPreviewClear, onModal,
   bowCard, target,
   isValidTarget, isSelectedTarget, onSelectTarget,
@@ -215,6 +219,7 @@ function PersonalityCard({
 }: {
   instance: CardInstance; h: string; onBow?: () => void;
   assignment?: BattleAssignment;
+  defenderAssignment?: BattleAssignment;
   isAssigning?: boolean;
   onContextMenu?: (e: React.MouseEvent) => void;
   bowCard: (instanceId: string, target: 'player' | 'opponent') => void;
@@ -222,7 +227,6 @@ function PersonalityCard({
   isValidTarget?: boolean;
   isSelectedTarget?: boolean;
   onSelectTarget?: () => void;
-  /** Show the "CAV" Cavalry Charge badge — unit can ride to current battlefield */
   showCavalryBadge?: boolean;
 } & SharedPreviewProps) {
   const pp = { onPreview, onPreviewMove, onPreviewClear, onModal };
@@ -327,6 +331,18 @@ function PersonalityCard({
           title="Cavalry unit — assign AFTER all non-Cavalry attackers and defenders"
         >
           CAV
+        </div>
+      )}
+
+      {/* ── Defender badge (opponent personality defending a province) ── */}
+      {defenderAssignment && (
+        <div
+          className="absolute -left-1 text-[7px] font-bold px-1 py-px rounded leading-tight shadow-md pointer-events-none
+                     bg-rose-600 text-white"
+          style={{ top: `${n * PEEK_VH}vh`, zIndex: n + 2 }}
+          title={`Defending Province ${defenderAssignment.provinceIndex + 1}`}
+        >
+          🛡P{defenderAssignment.provinceIndex + 1}
         </div>
       )}
     </div>

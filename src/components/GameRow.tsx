@@ -264,14 +264,29 @@ export function GameRow({
         </div>
         <div className="flex gap-2 items-end flex-1">
           {/* Dynasty deck — click to browse */}
-          <DeckStack
-            count={player.dynastyDeck.length}
-            label="Dy"
-            color="text-orange-400"
-            h={DECK_H}
-            onClick={handleDynastyDeckClick}
-            title="Click to browse Dynasty deck"
-          />
+          <div className="flex flex-col items-center gap-0.5">
+            <DeckStack
+              count={player.dynastyDeck.length}
+              label="Dy"
+              color="text-orange-400"
+              h={DECK_H}
+              onClick={handleDynastyDeckClick}
+              title="Click to browse Dynasty deck"
+            />
+            {/* Dead pile — clickable to browse */}
+            {(player.honorablyDead.length + player.dishonorablelyDead.length) > 0 && (
+              <button
+                onClick={() => {
+                  const dead = [...player.honorablyDead, ...player.dishonorablelyDead];
+                  onOpenDeckBrowser?.(dead, 'Dead Pile');
+                }}
+                className="text-[8px] text-rose-400/80 hover:text-rose-300 border border-rose-900/40 hover:border-rose-600 rounded px-1.5 py-0.5 transition-colors leading-none"
+                title="Browse dead personalities"
+              >
+                ☠ {player.honorablyDead.length + player.dishonorablelyDead.length}
+              </button>
+            )}
+          </div>
 
           {player.provinces.map(p => {
             const attackersHere = incomingAttacks.filter(a => a.provinceIndex === p.index);
@@ -284,7 +299,7 @@ export function GameRow({
                 key={p.index}
                 province={p}
                 strength={player.provinceStrength}
-                forceHidden={isOpponent}
+                forceHidden={isOpponent && !p.faceUp}
                 h={CARD_H}
                 isCycling={isCycling}
                 cycleSelected={cyclingSelected.has(p.index)}

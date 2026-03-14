@@ -1,6 +1,8 @@
 import { create } from 'zustand';
 import type { BattleAssignment, CardInstance, LogCategory, LogEntry, NormalizedCard, ParsedDeck, PlayerState, Province, ZoneId } from '../types/cards';
 import { calcUnitForce, createInstance, expandDeck, shuffle } from '../engine/gameActions';
+import { parseDeck } from '../engine/deckParser';
+import { applyMidGameState, UNICORN_TEST_DECK, PHOENIX_TEST_DECK } from '../engine/testFixtures';
 
 type GamePhase = 'setup' | 'playing';
 
@@ -43,6 +45,12 @@ interface GameStore {
    */
   battleAssignments: BattleAssignment[];
   /**
+   * Opponent's personality-to-province defender assignments.
+   * Each entry maps one opponent personality instanceId to the province they are defending.
+   * Populated automatically by the auto-opponent when the stage moves to 'resolving'.
+   */
+  defenderAssignments: BattleAssignment[];
+  /**
    * Which stage of the Attack Phase we are in.
    * null          → not in Attack Phase
    * 'assigning'   → player is assigning personalities to provinces
@@ -72,6 +80,12 @@ interface GameStore {
   setCatalogLoaded: (loaded: boolean) => void;
   setStrongholdOverride: (o: { honor: number; gold: number; provinceStrength: number } | null) => void;
   loadGame: (deck: ParsedDeck) => void;
+  /**
+   * Quick-start a simulated turn-3/4 game using the last pasted player deck
+   * (or the built-in Unicorn sample) vs. the hardcoded Phoenix test opponent.
+   * Useful for rapidly testing board UI without manually playing through setup.
+   */
+  loadTestGame: () => void;
   resetGame: () => void;
   setLastDeckText: (text: string) => void;
 
@@ -180,6 +194,11 @@ interface GameStore {
   passBattlefieldAction: (side: 'player' | 'opponent') => void;
   /** End the Attack Phase (all battlefields done or player retreats). */
   endAttackPhase: () => void;
+  /**
+   * Assign an opponent personality as a defender for a province.
+   * Called by the auto-opponent when the stage moves to 'resolving'.
+   */
+  assignDefender: (instanceId: string, provinceIndex: number) => void;
 }
 
 function emptyPlayer(): PlayerState {
@@ -205,6 +224,8 @@ function emptyPlayer(): PlayerState {
     proclaimUsed: false,
     cyclingDone: false,
     abilitiesUsed: [],
+    honorablyDead: [],
+    dishonorablelyDead: [],
   };
 }
 
@@ -276,6 +297,8 @@ function buildPlayerState(
       proclaimUsed: false,
       cyclingDone: false,
       abilitiesUsed: [],
+      honorablyDead: [],
+      dishonorablelyDead: [],
     };
 }
 
@@ -364,6 +387,7 @@ export const useGameStore = create<GameStore>((set, get) => {
   strongholdOverride: null,
   gameLog: [],
   battleAssignments: [],
+  defenderAssignments: [],
   battleStage: null,
   currentBattlefield: null,
   battleWindowPriority: 'player',
@@ -376,7 +400,7 @@ export const useGameStore = create<GameStore>((set, get) => {
     phase: 'setup', player: emptyPlayer(), opponent: emptyPlayer(),
     activePlayer: 'player', turnPhase: 'action', priority: 'player',
     consecutivePasses: 0, turnNumber: 1, strongholdOverride: null, gameLog: [],
-    battleAssignments: [], battleStage: null,
+    battleAssignments: [], defenderAssignments: [], battleStage: null,
     currentBattlefield: null, battleWindowPriority: 'player', battleWindowPasses: 0,
   }),
 
@@ -395,7 +419,7 @@ export const useGameStore = create<GameStore>((set, get) => {
     if (newCount >= 2) {
       pushLog('Both players passed — entering Attack Phase', 'phase', 'system');
       set({
-        turnPhase: 'attack', battleStage: 'assigning', battleAssignments: [],
+        turnPhase: 'attack', battleStage: 'assigning', battleAssignments: [], defenderAssignments: [],
         consecutivePasses: 0, priority: activePlayer,
         currentBattlefield: null, battleWindowPriority: 'player', battleWindowPasses: 0,
         player: clearedPlayer, opponent: { ...opponent, goldPool: 0 },
@@ -414,7 +438,7 @@ export const useGameStore = create<GameStore>((set, get) => {
     if (newCount >= 2) {
       pushLog('Both players passed — entering Attack Phase', 'phase', 'system');
       set({
-        turnPhase: 'attack', battleStage: 'assigning', battleAssignments: [],
+        turnPhase: 'attack', battleStage: 'assigning', battleAssignments: [], defenderAssignments: [],
         consecutivePasses: 0, priority: activePlayer,
         currentBattlefield: null, battleWindowPriority: 'player', battleWindowPasses: 0,
         player: { ...player, goldPool: 0 }, opponent: clearedOpponent,
@@ -622,6 +646,52 @@ export const useGameStore = create<GameStore>((set, get) => {
     });
   },
 
+  loadTestGame: () => {
+    const { lastDeckText, strongholdOverride } = get();
+
+    const playerDeckText   = lastDeckText?.trim() ? lastDeckText : UNICORN_TEST_DECK;
+    const playerDeckParsed = parseDeck(playerDeckText);
+    const opponentDeckParsed = parseDeck(PHOENIX_TEST_DECK);
+
+    // Build fresh initial states, then layer on the mid-game snapshot
+    const playerBase   = buildPlayerState(playerDeckParsed, strongholdOverride, false);
+    const opponentBase = buildPlayerState(opponentDeckParsed, null, true);
+
+    const player   = applyMidGameState(playerBase, false);
+    const opponent = applyMidGameState(opponentBase, true);
+
+    // Nudge honors to mid-game values:
+    // Player gained 2 honor (proclaims / events); opponent lost 1 (dishonored action)
+    const finalPlayer   = { ...player,   familyHonor: player.familyHonor + 2 };
+    const finalOpponent = { ...opponent, familyHonor: opponent.familyHonor - 1 };
+
+    set({
+      phase: 'playing',
+      player: finalPlayer,
+      opponent: finalOpponent,
+      activePlayer: 'player',
+      turnPhase: 'straighten',
+      priority: 'player',
+      consecutivePasses: 0,
+      turnNumber: 4,
+      battleAssignments: [],
+      defenderAssignments: [],
+      battleStage: null,
+      currentBattlefield: null,
+      battleWindowPriority: 'player',
+      battleWindowPasses: 0,
+      cyclingActive: null,
+      gameLog: [{
+        id: 'test-start',
+        turnNumber: 4,
+        phase: 'straighten',
+        side: 'system',
+        message: 'Test game loaded — Turn 4, Straighten Phase. Flip your provinces to begin.',
+        category: 'other',
+      }],
+    });
+  },
+
   // ── Phase advancement ─────────────────────────────────────────────────────
 
   advancePhase: () => {
@@ -754,6 +824,16 @@ export const useGameStore = create<GameStore>((set, get) => {
 
     const { card } = inst;
     const cost = Math.max(0, Number(card.cost) || 0);
+
+    // Hard block: player must have enough gold in the pool to pay the cost.
+    if (ps.goldPool < cost) {
+      pushLog(
+        `Cannot play ${card.name} — need ${cost}g but only have ${ps.goldPool}g`,
+        'gold', target,
+      );
+      return;
+    }
+
     const who  = target === 'player' ? 'You' : 'Opponent';
     const newHand = ps.hand.filter(c => c.instanceId !== instanceId);
 
@@ -879,7 +959,7 @@ export const useGameStore = create<GameStore>((set, get) => {
   declareBattle: () => {
     if (get().turnPhase !== 'action') return;
     pushLog('Battle declared — assign personalities to provinces', 'phase', 'system');
-    set({ turnPhase: 'attack', battleStage: 'assigning', battleAssignments: [] });
+    set({ turnPhase: 'attack', battleStage: 'assigning', battleAssignments: [], defenderAssignments: [] });
   },
 
   assignToBattlefield: (instanceId, provinceIndex) => {
@@ -946,7 +1026,7 @@ export const useGameStore = create<GameStore>((set, get) => {
         set({ battleStage: 'battleWindow', battleWindowPriority: 'opponent', battleWindowPasses: 0 });
       } else {
         // battleWindow closed — auto-resolve current battlefield
-        const { player, opponent, battleAssignments } = st;
+        const { player, opponent, battleAssignments, defenderAssignments } = st;
         const provinceIndex = currentBattlefield!;
         const province = opponent.provinces[provinceIndex];
         if (!province || province.broken) return;
@@ -955,14 +1035,20 @@ export const useGameStore = create<GameStore>((set, get) => {
           .filter(a => a.provinceIndex === provinceIndex)
           .map(a => a.instanceId);
         const attackers = player.personalitiesHome.filter(p => assignedIds.includes(p.instanceId));
-        // calcUnitForce(p, true) → respects bowed Personality/Follower and Item modifier rules
         const attackingForce = attackers.reduce((sum, p) => sum + calcUnitForce(p, true), 0);
-        const defenseStrength = opponent.provinceStrength;
-        const isBreached = attackingForce > defenseStrength;
+
+        const defenderIds = defenderAssignments
+          .filter(d => d.provinceIndex === provinceIndex)
+          .map(d => d.instanceId);
+        const defenders = opponent.personalitiesHome.filter(p => defenderIds.includes(p.instanceId));
+        const defendingForce = defenders.reduce((sum, p) => sum + calcUnitForce(p, true), 0);
+
+        const defenseTotal = opponent.provinceStrength + defendingForce;
+        const isBreached = attackingForce > defenseTotal;
 
         const resultMsg = isBreached
-          ? `Province ${provinceIndex + 1} BROKEN! (${attackingForce}f vs ${defenseStrength}s)`
-          : `Province ${provinceIndex + 1} holds. (${attackingForce}f vs ${defenseStrength}s)`;
+          ? `Province ${provinceIndex + 1} BROKEN! (${attackingForce}f vs ${opponent.provinceStrength}s + ${defendingForce}f)`
+          : `Province ${provinceIndex + 1} holds. (${attackingForce}f vs ${opponent.provinceStrength}s + ${defendingForce}f)`;
         pushLog(resultMsg, 'phase', 'system');
 
         const newOpponentProvinces = opponent.provinces.map((p, i) =>
@@ -973,18 +1059,79 @@ export const useGameStore = create<GameStore>((set, get) => {
             faceUp: isBreached ? false : p.faceUp,
           },
         );
-        const newPersonalitiesHome = player.personalitiesHome.map(p =>
-          assignedIds.includes(p.instanceId) ? { ...p, bowed: true } : p,
-        );
-        const remainingAssignments = battleAssignments.filter(a => a.provinceIndex !== provinceIndex);
+
+        // ── Battle casualties and honor ──────────────────────────────────────────
+        let newPlayer   = { ...player };
+        let newOpponent = { ...opponent, provinces: newOpponentProvinces };
+
+        if (isBreached) {
+          // Attackers win → defenders die honorably; attackers retreat home bowed
+          const defenderAttachments = defenders.flatMap(p => p.attachments);
+          if (defenders.length > 0) {
+            const names = defenders.map(p => p.card.name).join(', ');
+            pushLog(`Defenders killed in battle: ${names}`, 'battle', 'system');
+          }
+          const honorGain = defenders.length * 2;
+          if (honorGain > 0) {
+            pushLog(`You gain ${honorGain} Honor (${defenders.length} kill${defenders.length !== 1 ? 's' : ''})`, 'honor', 'player');
+          }
+          // Attackers bow and return home
+          newPlayer = {
+            ...newPlayer,
+            familyHonor: newPlayer.familyHonor + honorGain,
+            personalitiesHome: player.personalitiesHome.map(p =>
+              assignedIds.includes(p.instanceId) ? { ...p, bowed: true } : p,
+            ),
+          };
+          // Defenders die: removed from home, stripped of attachments, added to honorablyDead
+          newOpponent = {
+            ...newOpponent,
+            personalitiesHome: opponent.personalitiesHome.filter(p => !defenderIds.includes(p.instanceId)),
+            honorablyDead: [
+              ...opponent.honorablyDead,
+              ...defenders.map(p => ({ ...p, attachments: [] })),
+            ],
+            fateDiscard: [...opponent.fateDiscard, ...defenderAttachments],
+          };
+        } else {
+          // Defenders win → attackers die honorably; defenders stay home
+          const attackerAttachments = attackers.flatMap(p => p.attachments);
+          if (attackers.length > 0) {
+            const names = attackers.map(p => p.card.name).join(', ');
+            pushLog(`Attackers killed in battle: ${names}`, 'battle', 'system');
+          }
+          const honorGain = attackers.length * 2;
+          if (honorGain > 0) {
+            pushLog(`Opponent gains ${honorGain} Honor (${attackers.length} kill${attackers.length !== 1 ? 's' : ''})`, 'honor', 'opponent');
+          }
+          // Attackers die: removed from home, stripped of attachments, added to honorablyDead
+          newPlayer = {
+            ...newPlayer,
+            personalitiesHome: player.personalitiesHome.filter(p => !assignedIds.includes(p.instanceId)),
+            honorablyDead: [
+              ...player.honorablyDead,
+              ...attackers.map(p => ({ ...p, attachments: [] })),
+            ],
+            fateDiscard: [...player.fateDiscard, ...attackerAttachments],
+          };
+          // Opponent gains honor
+          newOpponent = {
+            ...newOpponent,
+            familyHonor: newOpponent.familyHonor + honorGain,
+          };
+        }
+
+        const remainingAssignments  = battleAssignments.filter(a => a.provinceIndex !== provinceIndex);
+        const remainingDefenders    = defenderAssignments.filter(d => d.provinceIndex !== provinceIndex);
 
         if (remainingAssignments.length === 0) {
           pushLog('All battlefields resolved → Dynasty Phase', 'phase', 'system');
           set({
-            turnPhase: 'dynasty', battleStage: null, battleAssignments: [],
+            turnPhase: 'dynasty', battleStage: null,
+            battleAssignments: [], defenderAssignments: [],
             currentBattlefield: null, battleWindowPasses: 0,
-            opponent: { ...opponent, provinces: newOpponentProvinces },
-            player:   { ...player,   personalitiesHome: newPersonalitiesHome },
+            opponent: newOpponent,
+            player:   newPlayer,
           });
         } else {
           pushLog('Battlefield resolved — select next battlefield to resolve', 'phase', 'system');
@@ -992,8 +1139,9 @@ export const useGameStore = create<GameStore>((set, get) => {
             battleStage: 'resolving', currentBattlefield: null,
             battleWindowPriority: 'opponent', battleWindowPasses: 0,
             battleAssignments: remainingAssignments,
-            opponent: { ...opponent, provinces: newOpponentProvinces },
-            player:   { ...player,   personalitiesHome: newPersonalitiesHome },
+            defenderAssignments: remainingDefenders,
+            opponent: newOpponent,
+            player:   newPlayer,
           });
         }
       }
@@ -1005,7 +1153,6 @@ export const useGameStore = create<GameStore>((set, get) => {
 
   endAttackPhase: () => {
     const { player, battleAssignments } = get();
-    // Any still-assigned personalities retreat home bowed
     const assignedIds = battleAssignments.map(a => a.instanceId);
     const newPersonalitiesHome = player.personalitiesHome.map(p =>
       assignedIds.includes(p.instanceId) ? { ...p, bowed: true } : p
@@ -1015,7 +1162,16 @@ export const useGameStore = create<GameStore>((set, get) => {
       turnPhase: 'dynasty',
       battleStage: null,
       battleAssignments: [],
+      defenderAssignments: [],
       player: { ...player, personalitiesHome: newPersonalitiesHome },
     });
+  },
+
+  assignDefender: (instanceId, provinceIndex) => {
+    const { defenderAssignments } = get();
+    const filtered = defenderAssignments.filter(d => d.instanceId !== instanceId);
+    const cardName = get().opponent.personalitiesHome.find(p => p.instanceId === instanceId)?.card.name ?? 'personality';
+    pushLog(`Opponent assigned ${cardName} to defend Province ${provinceIndex + 1}`, 'other', 'opponent');
+    set({ defenderAssignments: [...filtered, { instanceId, provinceIndex }] });
   },
 });});
