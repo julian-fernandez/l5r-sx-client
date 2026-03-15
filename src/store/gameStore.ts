@@ -1066,9 +1066,17 @@ export const useGameStore = create<GameStore>((set, get) => {
     if (turnPhase === 'end') {
       if (ps.hand.length > HAND_LIMIT) return;
 
-      // ── Victory conditions checked at end of active player's turn ──
-      get().checkVictoryConditions();
-      if (get().gameResult) return;
+      // ── Dishonor defeat: checked at the END of the active player's turn ──
+      // Only the active player's honor is evaluated here (it's their turn ending).
+      if (ps.familyHonor <= -20) {
+        const winner: 'player' | 'opponent' = activePlayer === 'player' ? 'opponent' : 'player';
+        pushLog(
+          `${activePlayer === 'player' ? 'You end' : 'Opponent ends'} their turn at ${ps.familyHonor} Honor — Dishonor defeat!`,
+          'honor', 'system',
+        );
+        set({ gameResult: { winner, reason: 'dishonor' } });
+        return;
+      }
 
       const newActive: 'player' | 'opponent' = activePlayer === 'player' ? 'opponent' : 'player';
       const incoming = st[newActive];
@@ -2295,32 +2303,15 @@ export const useGameStore = create<GameStore>((set, get) => {
   // ── Honor & Victory ───────────────────────────────────────────────────────────
 
   checkVictoryConditions: () => {
-    if (get().gameResult) return; // already ended — don't overwrite
+    // Honor and Dishonor victories have strict turn-phase timing:
+    //   Dishonor (≤ −20): checked ONLY at the end of the active player's End Phase.
+    //   Honor   (≥  40) : checked ONLY at the START of the incoming player's turn.
+    // Both are handled inline in advancePhase — NOT here.
+    //
+    // Military and Enlightenment victories are IMMEDIATE — triggered here
+    // when a province breaks or a Ring enters play.
+    if (get().gameResult) return;
     const { player, opponent } = get();
-
-    // Honor victory: ≥ 40 Family Honor
-    if (player.familyHonor >= 40) {
-      pushLog('You reached 40 Honor — Honor Victory!', 'honor', 'system');
-      set({ gameResult: { winner: 'player', reason: 'honor' } });
-      return;
-    }
-    if (opponent.familyHonor >= 40) {
-      pushLog('Opponent reached 40 Honor — Honor Victory!', 'honor', 'system');
-      set({ gameResult: { winner: 'opponent', reason: 'honor' } });
-      return;
-    }
-
-    // Dishonor defeat: ≤ −20 Family Honor
-    if (player.familyHonor <= -20) {
-      pushLog('You reached −20 Honor — Dishonor defeat!', 'honor', 'system');
-      set({ gameResult: { winner: 'opponent', reason: 'dishonor' } });
-      return;
-    }
-    if (opponent.familyHonor <= -20) {
-      pushLog('Opponent reached −20 Honor — Dishonor defeat!', 'honor', 'system');
-      set({ gameResult: { winner: 'player', reason: 'dishonor' } });
-      return;
-    }
 
     // Military victory: all 4 opponent provinces broken
     if (player.provinces.every(p => p.broken)) {
@@ -2367,8 +2358,8 @@ export const useGameStore = create<GameStore>((set, get) => {
     const ps = get()[target];
     const who = target === 'player' ? 'You' : 'Opponent';
     pushLog(`${who} gain${amount === 1 ? 's' : ''} ${amount} Honor${reason ? ` (${reason})` : ''}`, 'honor', target);
+    // Honor victory is only checked at the START of a player's turn — not immediately.
     set({ [target]: { ...ps, familyHonor: ps.familyHonor + amount } });
-    get().checkVictoryConditions();
   },
 
   loseHonor: (amount, target, reason) => {
@@ -2376,8 +2367,8 @@ export const useGameStore = create<GameStore>((set, get) => {
     const ps = get()[target];
     const who = target === 'player' ? 'You' : 'Opponent';
     pushLog(`${who} lose${amount === 1 ? 's' : ''} ${amount} Honor${reason ? ` (${reason})` : ''}`, 'honor', target);
+    // Dishonor defeat is only checked at the END of the active player's turn — not immediately.
     set({ [target]: { ...ps, familyHonor: ps.familyHonor - amount } });
-    get().checkVictoryConditions();
   },
 
   // ── Token system ─────────────────────────────────────────────────────────────
