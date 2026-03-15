@@ -76,6 +76,7 @@ export function GameRow({
   const recruitFromProvince   = useGameStore(s => s.recruitFromProvince);
   const discardFromProvince   = useGameStore(s => s.discardFromProvince);
   const discardHandCard       = useGameStore(s => s.discardHandCard);
+  const useKharmic            = useGameStore(s => s.useKharmic);
   const turnPhase             = useGameStore(s => s.turnPhase);
   const turnNumber            = useGameStore(s => s.turnNumber);
   const cyclingActive         = useGameStore(s => s.cyclingActive);
@@ -91,6 +92,8 @@ export function GameRow({
   const isDynasty  = turnPhase === 'dynasty';
   const isDiscard  = turnPhase === 'discard';
   const isEnd      = turnPhase === 'end';
+  const isAction   = turnPhase === 'action';
+  const isAttack   = turnPhase === 'attack';
   const HAND_LIMIT = 8;
   const mustDiscard = isEnd && !isOpponent && player.hand.length > HAND_LIMIT;
 
@@ -191,6 +194,18 @@ export function GameRow({
       }
     }
 
+    // ── Kharmic (Limited, action or attack phase, player only) ─────────────
+    const isKharmic = cardData.keywords.some(k => k.toLowerCase().trim() === 'kharmic');
+    if (!isOpponent && isKharmic && (isAction || isAttack)) {
+      items.push({
+        label: 'Kharmic — discard to refill face-up',
+        sublabel: `2g — Repeatable Limited`,
+        onClick: () => useKharmic('province', province.card!.instanceId, target, province.index),
+        disabled: player.goldPool < 2,
+        variant: 'primary',
+      });
+    }
+
     if (items.length > 0) items.push({ separator: true });
     items.push({ label: 'View card', onClick: () => onModal?.(cardData) });
     setCtxMenu({ items, x: e.clientX, y: e.clientY });
@@ -231,6 +246,8 @@ export function GameRow({
           canPlay={(inst) => canPlayFromHand(
             inst.card, turnPhase, battleStage, activePlayer, priority, battleWindowPriority,
           )}
+          onKharmic={!isOpponent ? (instanceId) => useKharmic('hand', instanceId, target) : undefined}
+          canKharmic={!isOpponent && (isAction || isAttack) && player.goldPool >= 2}
           pp={pp}
         />
       </div>
@@ -421,7 +438,7 @@ export function GameRow({
  * Hovering a card lifts it above the others (z-index + translate-y).
  */
 function HandFan({
-  cards, cardH, isOpponent, mustDiscard, onDiscard, onPlayCard, onManualPlay, onPlayRingPermanent, canPlay, pp,
+  cards, cardH, isOpponent, mustDiscard, onDiscard, onPlayCard, onManualPlay, onPlayRingPermanent, canPlay, onKharmic, canKharmic, pp,
 }: {
   cards: CardInstance[];
   cardH: string;
@@ -432,6 +449,10 @@ function HandFan({
   onManualPlay?: (inst: CardInstance) => void;
   onPlayRingPermanent?: (inst: CardInstance) => void;
   canPlay?: (inst: CardInstance) => boolean;
+  /** Called when the player uses the Kharmic ability on this hand card */
+  onKharmic?: (instanceId: string) => void;
+  /** Whether Kharmic Limited timing is active and player can afford it (2g) */
+  canKharmic?: boolean;
   pp: SharedPreviewProps;
 }) {
   const [ctxMenu, setCtxMenu] = useState<{ items: ContextMenuEntry[]; x: number; y: number } | null>(null);
@@ -487,6 +508,19 @@ function HandFan({
         label: '⬡ Put into play (condition met)',
         sublabel: 'Enters Celestials & Events zone — counts toward Enlightenment',
         onClick: () => onPlayRingPermanent(inst),
+        variant: 'primary',
+      });
+    }
+
+    // Kharmic: discard from hand to draw a card (Limited, 2g)
+    const isKharmic = inst.card.keywords.some(k => k.toLowerCase().trim() === 'kharmic');
+    if (isKharmic && onKharmic) {
+      items.push({ separator: true });
+      items.push({
+        label: 'Kharmic — discard to draw',
+        sublabel: '2g — Repeatable Limited',
+        onClick: () => onKharmic(inst.instanceId),
+        disabled: !canKharmic,
         variant: 'primary',
       });
     }
