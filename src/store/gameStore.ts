@@ -4,6 +4,24 @@ import { calcUnitForce, calcFollowerForce, createInstance, expandDeck, shuffle, 
 import type { BattleKeywordType } from '../engine/gameActions';
 import { parseDeck } from '../engine/deckParser';
 import { applyMidGameState, UNICORN_TEST_DECK, PHOENIX_TEST_DECK } from '../engine/testFixtures';
+import type { SerializedAction } from '../../server/src/types';
+
+// ─── Module-level relay state ─────────────────────────────────────────────────
+// Stored outside Zustand so relay calls don't trigger re-renders.
+// Set by App.tsx via setRelayCallback() when a multiplayer game starts.
+
+let _relayFn: ((a: SerializedAction) => void) | null = null;
+/** Prevents echo: while applyRelayedAction is running, don't re-relay. */
+let _suppressRelay = false;
+
+function relay(action: SerializedAction): void {
+  if (_relayFn && !_suppressRelay) _relayFn(action);
+}
+
+/** Call before applyRelayedAction to prevent echo-relay. */
+export function suppressRelay(): void  { _suppressRelay = true;  }
+/** Call after  applyRelayedAction to restore relay. */
+export function unsuppressRelay(): void { _suppressRelay = false; }
 
 type GamePhase = 'setup' | 'lobby' | 'playing';
 
@@ -269,6 +287,8 @@ interface GameStore {
    * Increments opponent hand count; actual card is unknown.
    */
   applyOpponentDrew: () => void;
+  /** Register the socket send-action function so store actions self-relay. */
+  setRelayCallback: (fn: ((a: SerializedAction) => void) | null) => void;
 }
 
 function emptyPlayer(): PlayerState {
@@ -383,10 +403,11 @@ function buildPlayerState(
  * Replacement cards drawn for celestial/event provinces are flipped face-up
  * immediately as part of the same reveal action.
  */
-function applyRevealProvinces(state: PlayerState): PlayerState {
+function applyRevealProvinces(state: PlayerState): { state: PlayerState; resolved: string[] } {
   let dynastyDeck     = [...state.dynastyDeck];
   let specialsInPlay  = [...state.specialsInPlay];
   let dynastyDiscard  = [...state.dynastyDiscard];
+  const resolved: string[] = [];
 
   const provinces = state.provinces.map(p => {
     if (!p.card) return { ...p, faceUp: true };
@@ -394,28 +415,35 @@ function applyRevealProvinces(state: PlayerState): PlayerState {
     const faceUpInst = { ...p.card, faceUp: true };
 
     if (cardType === 'celestial') {
-      dynastyDiscard = [...dynastyDiscard, ...specialsInPlay.filter(c => c.card.type === 'celestial')];
+      // Displaced celestial (if any) goes to discard
+      const displaced = specialsInPlay.filter(c => c.card.type === 'celestial');
+      if (displaced.length) {
+        resolved.push(`${displaced[0].card.name} displaced`);
+        dynastyDiscard = [...dynastyDiscard, ...displaced];
+      }
+      resolved.push(`${p.card.card.name} → in play (Celestial)`);
       specialsInPlay = [
         ...specialsInPlay.filter(c => c.card.type !== 'celestial'),
         { ...faceUpInst, location: 'specialsInPlay' as ZoneId },
       ];
       const [next = null, ...rest] = dynastyDeck;
       dynastyDeck = rest;
-      // Replacement card is also revealed face-up (it's part of the initial flip)
+      // Province refills face-down with a new card
       return {
         ...p, faceUp: true,
-        card: next ? { ...next, location: p.card.location, faceUp: true, bowed: false } : null,
+        card: next ? { ...next, location: p.card.location, faceUp: false, bowed: false } : null,
       };
     }
 
     if (cardType === 'event') {
+      resolved.push(`${p.card.card.name} → resolved (Event)`);
       dynastyDiscard = [...dynastyDiscard, { ...faceUpInst, location: 'dynastyDiscard' as ZoneId }];
       const [next = null, ...rest] = dynastyDeck;
       dynastyDeck = rest;
-      // Replacement card is also revealed face-up
+      // Province refills face-down with a new card
       return {
         ...p, faceUp: true,
-        card: next ? { ...next, location: p.card.location, faceUp: true, bowed: false } : null,
+        card: next ? { ...next, location: p.card.location, faceUp: false, bowed: false } : null,
       };
     }
 
@@ -434,7 +462,10 @@ function applyRevealProvinces(state: PlayerState): PlayerState {
     return { ...p, faceUp: true, card: faceUpInst };
   });
 
-  return { ...state, provinces, dynastyDeck, specialsInPlay, dynastyDiscard };
+  return {
+    state: { ...state, provinces, dynastyDeck, specialsInPlay, dynastyDiscard },
+    resolved,
+  };
 }
 
 export const useGameStore = create<GameStore>((set, get) => {
@@ -483,13 +514,21 @@ export const useGameStore = create<GameStore>((set, get) => {
   setCatalogLoaded: (loaded) => set({ catalogLoaded: loaded }),
   setLastDeckText: (text) => set({ lastDeckText: text }),
   setStrongholdOverride: (o) => set({ strongholdOverride: o }),
-  resetGame: () => set({
-    phase: 'setup', player: emptyPlayer(), opponent: emptyPlayer(),
-    activePlayer: 'player', turnPhase: 'action', priority: 'player',
-    consecutivePasses: 0, turnNumber: 1, strongholdOverride: null, gameLog: [],
-    battleAssignments: [], defenderAssignments: [], battleStage: null,
-    currentBattlefield: null, battleWindowPriority: 'player', battleWindowPasses: 0,
-  }),
+  resetGame: () => {
+    // Clear any saved multiplayer session so auto-reconnect doesn't fire
+    sessionStorage.removeItem('l5r_room_id');
+    sessionStorage.removeItem('l5r_player_id');
+    sessionStorage.removeItem('l5r_player_index');
+    return set({
+      phase: 'setup', player: emptyPlayer(), opponent: emptyPlayer(),
+      multiplayerMode: false, myPlayerIndex: null,
+      activePlayer: 'player', turnPhase: 'action', priority: 'player',
+      consecutivePasses: 0, turnNumber: 1, strongholdOverride: null, gameLog: [],
+      battleAssignments: [], defenderAssignments: [], battleStage: null,
+      currentBattlefield: null, battleWindowPriority: 'player', battleWindowPasses: 0,
+      cyclingActive: null, gameResult: null,
+    });
+  },
 
   // ── Internal log helper ───────────────────────────────────────────────────
 
@@ -501,6 +540,7 @@ export const useGameStore = create<GameStore>((set, get) => {
   passPriority: () => {
     const { priority, consecutivePasses, activePlayer, player, opponent } = get();
     if (priority !== 'player') return;
+    relay({ type: 'pass-priority' });
     const newCount = consecutivePasses + 1;
     const clearedPlayer = { ...player, goldPool: 0 };
     if (newCount >= 2) {
@@ -583,6 +623,7 @@ export const useGameStore = create<GameStore>((set, get) => {
           const gpMsg = hit.goldDelta < 0 ? ` (−${Math.abs(hit.goldDelta)}g removed)` : '';
           pushLog(`${who} unbowed ${card?.card.name ?? 'card'}${gpMsg}`, 'bow', target);
         }
+        if (target === 'player') relay({ type: 'bow-card', instanceId, target: 'player' });
         set({
           [target]: {
             ...ps,
@@ -606,6 +647,7 @@ export const useGameStore = create<GameStore>((set, get) => {
           `${who} ${nowBowed ? 'bowed' : 'unbowed'} ${att?.card.name ?? 'attachment'} (on ${personalities[pi].card.name})`,
           'bow', target,
         );
+        if (target === 'player') relay({ type: 'bow-card', instanceId, target: 'player' });
         set({
           [target]: {
             ...ps,
@@ -631,6 +673,7 @@ export const useGameStore = create<GameStore>((set, get) => {
     } else {
       pushLog(`${who} unbowed ${shName} (−${ps.strongholdGoldProduction}g removed)`, 'gold', target);
     }
+    if (target === 'player') relay({ type: 'bow-stronghold', target: 'player' });
     set({ [target]: { ...ps, strongholdBowed: nowBowed, goldPool: Math.max(0, ps.goldPool + goldDelta) } });
   },
 
@@ -698,6 +741,7 @@ export const useGameStore = create<GameStore>((set, get) => {
       pushLog(`${who} recruited ${inst.card.name} for ${finalCost}g`, 'recruit', target);
     }
 
+    if (target === 'player') relay({ type: 'recruit', provinceIndex, proclaim });
     set({
       [target]: {
         ...ps,
@@ -799,11 +843,20 @@ export const useGameStore = create<GameStore>((set, get) => {
     const ps = st[activePlayer];
     const HAND_LIMIT = 8;
 
+    // Relay immediately so the opponent mirrors this phase advance.
+    // The hand-limit guard below is the only early-return that can block the action;
+    // in multiplayer both clients track the same active player hand, so the guard
+    // fires or not identically on both sides.
+    relay({ type: 'advance-phase' });
+
     // ── First-turn: reveal the active player's provinces ──────────────────────
     if (turnPhase === 'straighten') {
-      const revealed = applyRevealProvinces(st[activePlayer]);
-      const logMsg = `${activePlayer === 'player' ? 'You' : 'Opponent'} flipped provinces — any events/celestials resolved`;
-      pushLog(logMsg, 'phase', 'system');
+      const { state: revealed, resolved } = applyRevealProvinces(st[activePlayer]);
+      const who = activePlayer === 'player' ? 'You' : 'Opponent';
+      const resolvedMsg = resolved.length
+        ? `: ${resolved.join('; ')}`
+        : '';
+      pushLog(`${who} flipped provinces${resolvedMsg}`, 'phase', 'system');
       set({ [activePlayer]: revealed, turnPhase: 'event' });
       return;
     }
@@ -876,7 +929,7 @@ export const useGameStore = create<GameStore>((set, get) => {
 
       // Per SX rules: all face-down province cards flip face-up at the start of every turn.
       // Events and Celestials resolve immediately (same as the first-turn flip).
-      const revealed = applyRevealProvinces(straightened);
+      const { state: revealed, resolved } = applyRevealProvinces(straightened);
 
       // ── Victory condition: Honor (≥ 40) at start of incoming player's turn ──
       if (revealed.familyHonor >= 40) {
@@ -888,8 +941,9 @@ export const useGameStore = create<GameStore>((set, get) => {
         return;
       }
 
+      const resolvedMsg = resolved.length ? ` — ${resolved.join('; ')}` : '';
       pushLog(
-        `Turn ${st.turnNumber} ended — Turn ${st.turnNumber + 1} begins (${newActive === 'player' ? 'Your' : "Opponent's"} turn). Face-down provinces revealed.`,
+        `Turn ${st.turnNumber} ended — Turn ${st.turnNumber + 1} begins (${newActive === 'player' ? 'Your' : "Opponent's"} turn). Provinces revealed${resolvedMsg}.`,
         'phase', 'system',
       );
       set({
@@ -918,6 +972,7 @@ export const useGameStore = create<GameStore>((set, get) => {
       ? { ...next, location: `province${provinceIndex}` as ZoneId, faceUp: false, bowed: false }
       : null;
 
+    if (target === 'player') relay({ type: 'discard-province', provinceIndex });
     set({
       [target]: {
         ...ps,
@@ -936,6 +991,7 @@ export const useGameStore = create<GameStore>((set, get) => {
     if (!card) return;
     const who = target === 'player' ? 'You' : 'Opponent';
     pushLog(`${who} discarded ${card.card.name} from hand`, 'discard', target);
+    if (target === 'player') relay({ type: 'discard-from-hand', instanceId });
     set({
       [target]: {
         ...ps,
@@ -975,6 +1031,7 @@ export const useGameStore = create<GameStore>((set, get) => {
         `${who} equipped ${card.name} → ${personality.card.name} (−${cost}g)`,
         'other', target,
       );
+      if (target === 'player') relay({ type: 'play-from-hand', instanceId, targetId: attachTargetId, abilityText: selectedAbility });
       set({
         [target]: {
           ...ps,
@@ -996,6 +1053,7 @@ export const useGameStore = create<GameStore>((set, get) => {
         `${who} played ${card.name}${abilityNote}${cost > 0 ? ` (−${cost}g)` : ''} → Fate discard`,
         'other', target,
       );
+      if (target === 'player') relay({ type: 'play-from-hand', instanceId, abilityText: selectedAbility });
       set({
         [target]: {
           ...ps,
@@ -1021,10 +1079,10 @@ export const useGameStore = create<GameStore>((set, get) => {
     if (get().cyclingActive !== target) return;
     const ps = get()[target];
 
-    // Collect face-up province cards that were selected (in index order)
+    // Any province with a card can be cycled, face-up or face-down
     const validIndices = selectedIndices.filter(i => {
       const p = ps.provinces[i];
-      return p && p.card && p.faceUp;
+      return p && p.card && !p.broken;
     });
 
     // All selected cards go to the bottom of the dynasty deck simultaneously
@@ -1055,9 +1113,15 @@ export const useGameStore = create<GameStore>((set, get) => {
     if (validIndices.length === 0) {
       pushLog(`${who} cycled 0 provinces`, 'cycle', target);
     } else {
-      const names = validIndices.map(i => ps.provinces[i].card!.card.name).join(', ');
+      const names = validIndices
+        .map(i => {
+          const p = ps.provinces[i];
+          return p.faceUp ? p.card!.card.name : '(face-down)';
+        })
+        .join(', ');
       pushLog(`${who} cycled ${validIndices.length} province${validIndices.length > 1 ? 's' : ''}: ${names}`, 'cycle', target);
     }
+    if (target === 'player') relay({ type: 'commit-cycling', selectedIndices: validIndices });
     set({
       cyclingActive: null,
       [target]: { ...ps, dynastyDeck: deckWorking, provinces: newProvinces, cyclingDone: true },
@@ -1087,6 +1151,7 @@ export const useGameStore = create<GameStore>((set, get) => {
   declareBattle: () => {
     if (get().turnPhase !== 'action') return;
     pushLog('Battle declared — assign personalities to provinces', 'phase', 'system');
+    relay({ type: 'declare-battle' });
     set({ turnPhase: 'attack', battleStage: 'assigning', battleAssignments: [], defenderAssignments: [] });
   },
 
@@ -1098,12 +1163,14 @@ export const useGameStore = create<GameStore>((set, get) => {
     const filtered = battleAssignments.filter(a => a.instanceId !== instanceId);
     const cardName = get().player.personalitiesHome.find(p => p.instanceId === instanceId)?.card.name ?? 'personality';
     pushLog(`Assigned ${cardName} to attack Province ${provinceIndex + 1}`, 'other', 'player');
+    relay({ type: 'assign-attacker', instanceId, provinceIndex });
     set({ battleAssignments: [...filtered, { instanceId, provinceIndex }] });
   },
 
   unassignFromBattle: (instanceId) => {
     const cardName = get().player.personalitiesHome.find(p => p.instanceId === instanceId)?.card.name ?? 'personality';
     pushLog(`${cardName} removed from battle`, 'other', 'player');
+    relay({ type: 'unassign-attacker', instanceId });
     set({ battleAssignments: get().battleAssignments.filter(a => a.instanceId !== instanceId) });
   },
 
@@ -1142,6 +1209,7 @@ export const useGameStore = create<GameStore>((set, get) => {
     if (battleWindowPriority !== side) return;
     if (battleStage !== 'engage' && battleStage !== 'battleWindow') return;
 
+    if (side === 'player') relay({ type: 'pass-battle', side: 'player' });
     const otherSide: 'player' | 'opponent' = side === 'player' ? 'opponent' : 'player';
     const newCount = battleWindowPasses + 1;
     const sideLabel = side === 'player' ? 'You' : 'Opponent';
@@ -1328,6 +1396,7 @@ export const useGameStore = create<GameStore>((set, get) => {
     });
     const newOpponentHome = opponent.personalitiesHome.map(p => ({ ...p, tempForceBonus: 0 }));
     pushLog('Attack Phase ended — unresolved attackers return home', 'phase', 'system');
+    relay({ type: 'end-attack-phase' });
     set({
       turnPhase: 'dynasty',
       battleStage: null,
@@ -1568,6 +1637,7 @@ export const useGameStore = create<GameStore>((set, get) => {
       return;
     }
     pushLog('Border Keep: activated once-per-game province cycling', 'other', 'player');
+    relay({ type: 'border-keep-cycle', holdingInstanceId });
     set({
       cyclingActive: 'player',
       player: {
@@ -1624,6 +1694,7 @@ export const useGameStore = create<GameStore>((set, get) => {
       `${target === 'player' ? 'Your' : "Opponent's"} ${pers.card.name} is ${nowDishonored ? 'dishonored' : 'restored (honor restored)'}`,
       'honor', target,
     );
+    if (target === 'player') relay({ type: 'dishonor-personality', instanceId, target: 'player' });
     set({
       [target]: {
         ...side,
@@ -1649,7 +1720,7 @@ export const useGameStore = create<GameStore>((set, get) => {
       player: ownState,
       opponent: opponentState,
       activePlayer,
-      turnPhase: 'event',
+      turnPhase: 'straighten',
       priority: activePlayer,
       consecutivePasses: 0,
       turnNumber: 1,
@@ -1664,6 +1735,8 @@ export const useGameStore = create<GameStore>((set, get) => {
       cyclingActive: null,
     });
   },
+
+  setRelayCallback: (fn) => { _relayFn = fn; },
 
   applyOpponentDrew: () => {
     const { opponent } = get();

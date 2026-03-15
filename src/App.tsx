@@ -1,7 +1,7 @@
 import { useEffect, useCallback } from 'react';
 import type { ParsedDeck, PlayerState } from './types/cards';
 import { loadCatalog } from './engine/cardCatalog';
-import { useGameStore } from './store/gameStore';
+import { useGameStore, suppressRelay, unsuppressRelay } from './store/gameStore';
 import { DeckInput } from './components/DeckInput';
 import { Board } from './components/Board';
 import { MultiplayerLobby } from './components/MultiplayerLobby';
@@ -155,6 +155,17 @@ export default function App() {
     onReconnectOk: handleReconnectOk,
   });
 
+  // ── Register relay callback when multiplayer is active ─────────────────────
+  // The store's relay() helper calls this fn to forward local actions to the server.
+  useEffect(() => {
+    const store = useGameStore.getState();
+    if (multiplayerMode) {
+      store.setRelayCallback(mp.sendAction);
+    } else {
+      store.setRelayCallback(null);
+    }
+  }, [multiplayerMode, mp.sendAction]);
+
   // ── Route from URL (?room=) ─────────────────────────────────────────────────
   const urlRoomCode = getRoomCodeFromUrl();
   useEffect(() => {
@@ -213,64 +224,78 @@ export default function App() {
 }
 
 // ─── Apply a relayed opponent action to the local Zustand store ───────────────
-// Each case maps to an existing store action, but targeted at 'opponent'.
+// Suppress relay while applying so we don't echo the action back.
 function applyRelayedAction(action: import('../server/src/types').SerializedAction) {
-  const store = useGameStore.getState();
+  suppressRelay();
+  try {
+    const store = useGameStore.getState();
 
-  switch (action.type) {
-    case 'bow-card':
-      store.bowCard(action.instanceId, action.target === 'player' ? 'opponent' : 'player');
-      break;
-    case 'bow-stronghold':
-      store.bowStronghold(action.target === 'player' ? 'opponent' : 'player');
-      break;
-    case 'advance-phase':
-      store.advancePhase();
-      break;
-    case 'recruit':
-      store.recruitFromProvince(action.provinceIndex, 'opponent', {
-        discount: false,
-        proclaim: action.proclaim,
-      });
-      break;
-    case 'discard-province':
-      store.discardFromProvince(action.provinceIndex, 'opponent');
-      break;
-    case 'discard-from-hand':
-      store.discardHandCard(action.instanceId, 'opponent');
-      break;
-    case 'declare-battle':
-      store.declareBattle();
-      break;
-    case 'assign-attacker':
-      store.assignToBattlefield(action.instanceId, action.provinceIndex);
-      break;
-    case 'unassign-attacker':
-      store.unassignFromBattle(action.instanceId);
-      break;
-    case 'assign-defender':
-      store.assignDefender(action.instanceId, action.provinceIndex);
-      break;
-    case 'pass-battle':
-      store.passBattlefieldAction(action.side === 'player' ? 'opponent' : 'player');
-      break;
-    case 'end-attack-phase':
-      store.endAttackPhase();
-      break;
-    case 'start-cycling':
-      store.startCycling('opponent');
-      break;
-    case 'border-keep-cycle':
-      store.borderKeepCycle(action.holdingInstanceId);
-      break;
-    case 'dishonor-personality':
-      store.dishonorPersonality(
-        action.instanceId,
-        action.target === 'player' ? 'opponent' : 'player',
-      );
-      break;
-    default:
-      // For unrecognized actions, do nothing — manual resolution handles complex effects
-      break;
+    switch (action.type) {
+      case 'bow-card':
+        store.bowCard(action.instanceId, action.target === 'player' ? 'opponent' : 'player');
+        break;
+      case 'bow-stronghold':
+        store.bowStronghold(action.target === 'player' ? 'opponent' : 'player');
+        break;
+      case 'advance-phase':
+        store.advancePhase();
+        break;
+      case 'pass-priority':
+        store.opponentAutoPass();
+        break;
+      case 'recruit':
+        store.recruitFromProvince(action.provinceIndex, 'opponent', {
+          discount: false,
+          proclaim: action.proclaim,
+        });
+        break;
+      case 'discard-province':
+        store.discardFromProvince(action.provinceIndex, 'opponent');
+        break;
+      case 'discard-from-hand':
+        store.discardHandCard(action.instanceId, 'opponent');
+        break;
+      case 'declare-battle':
+        store.declareBattle();
+        break;
+      case 'assign-attacker':
+        store.assignToBattlefield(action.instanceId, action.provinceIndex);
+        break;
+      case 'unassign-attacker':
+        store.unassignFromBattle(action.instanceId);
+        break;
+      case 'assign-defender':
+        store.assignDefender(action.instanceId, action.provinceIndex);
+        break;
+      case 'pass-battle':
+        store.passBattlefieldAction(action.side === 'player' ? 'opponent' : 'player');
+        break;
+      case 'end-attack-phase':
+        store.endAttackPhase();
+        break;
+      case 'play-from-hand':
+        store.playFromHand(action.instanceId, 'opponent', action.targetId, action.abilityText);
+        break;
+      case 'commit-cycling':
+        store.commitCycling(action.selectedIndices, 'opponent');
+        break;
+      case 'start-cycling':
+        store.startCycling('opponent');
+        break;
+      case 'border-keep-cycle':
+        store.borderKeepCycle(action.holdingInstanceId);
+        break;
+      case 'dishonor-personality':
+        store.dishonorPersonality(
+          action.instanceId,
+          action.target === 'player' ? 'opponent' : 'player',
+        );
+        break;
+      default:
+        // For unrecognized actions, do nothing — manual resolution handles complex effects
+        break;
+    }
+  } finally {
+    unsuppressRelay();
   }
 }

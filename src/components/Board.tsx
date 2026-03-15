@@ -67,7 +67,7 @@ interface DeckBrowserState {
   title: string;
 }
 
-export function Board({ player, opponent, activePlayer, onReset, multiplayerMode = false, sendAction: _sendAction }: Props) {
+export function Board({ player, opponent, activePlayer, onReset, multiplayerMode = false, sendAction }: Props) {
   const [preview, setPreview]               = useState<PreviewState | null>(null);
   const [modal, setModal]                   = useState<NormalizedCard | null>(null);
   const [deckBrowser, setDeckBrowser]       = useState<DeckBrowserState | null>(null);
@@ -102,7 +102,10 @@ export function Board({ player, opponent, activePlayer, onReset, multiplayerMode
   const battleWindowPriority  = useGameStore(s => s.battleWindowPriority);
 
   // ── Auto-opponent: skip the entire opponent turn & auto-pass priority ──────
+  // Disabled entirely in multiplayer — the real opponent controls their own turn.
   useEffect(() => {
+    if (multiplayerMode) return;
+
     const DELAY = 450;
     let timer: number;
 
@@ -120,7 +123,7 @@ export function Board({ player, opponent, activePlayer, onReset, multiplayerMode
           DELAY,
         );
       } else if (turnPhase === 'attack') {
-        // Skip battle entirely on opponent's turn
+        // Skip battle entirely on opponent's turn (solo only — handled by relay in multiplayer)
         timer = window.setTimeout(() => endAttackPhase(), DELAY);
       }
     } else {
@@ -138,14 +141,17 @@ export function Board({ player, opponent, activePlayer, onReset, multiplayerMode
 
     return () => clearTimeout(timer);
   }, [
+    multiplayerMode,
     activePlayer, turnPhase, priority, battleStage, battleWindowPriority,
     advancePhase, opponentAutoPass, passPriority, endAttackPhase, passBattlefieldAction,
   ]);
 
   // ── Auto-defender: when player commits attackers, opponent assigns defenders ─
   // Fires when battleStage moves to 'resolving' and no defenders are yet assigned.
+  // In multiplayer the real opponent assigns defenders on their own client.
   // Assignment order mirrors the CR: non-Cavalry defenders first, then Cavalry.
   useEffect(() => {
+    if (multiplayerMode) return;
     if (battleStage !== 'resolving') return;
     if (defenderAssignments.length > 0) return; // already assigned
 
@@ -334,12 +340,16 @@ export function Board({ player, opponent, activePlayer, onReset, multiplayerMode
           <PhaseIndicator phase={turnPhase} priority={priority} />
 
           <div className="flex items-center gap-2">
-            {/* Pass priority — only show during player's action phase */}
-            {turnPhase === 'action' && activePlayer === 'player' && priority === 'player' && (
+            {/* Pass priority — show whenever the local player has priority in the action phase.
+                In multiplayer priority can be ours even during the opponent's active turn. */}
+            {turnPhase === 'action' && priority === 'player' && (
               <PassPriorityButton onClick={passPriority} />
             )}
 
-            <NextPhaseButton phase={turnPhase} activePlayer={activePlayer} onAdvance={advancePhase} />
+            {/* In multiplayer, only show the phase button when it's our turn */}
+            {(!multiplayerMode || activePlayer === 'player') && (
+              <NextPhaseButton phase={turnPhase} activePlayer={activePlayer} onAdvance={advancePhase} />
+            )}
 
             {/* Panel toggles */}
             <ActionsPanelToggle active={openPanel === 'actions'} onClick={() => togglePanel('actions')} />
@@ -357,28 +367,33 @@ export function Board({ player, opponent, activePlayer, onReset, multiplayerMode
         {/* ── Content ───────────────────────────────────────────────── */}
         <div className="flex flex-col flex-1 min-h-0 min-w-0 px-2 py-1.5 gap-1.5">
 
-          {/* OPPONENT — top GameRow (flex-1, grows) */}
-          <GameRow
-            player={opponent}
-            isOpponent
-            onOpenDeckBrowser={handleOpenDeckBrowser}
-            incomingAttacks={battleAssignments}
-            attackerPersonalities={player.personalitiesHome}
-            {...pp}
-          />
-
-          {/* OPPONENT — in-play row (compact, fixed) */}
-          <InPlayRow
-            holdingsInPlay={opponent.holdingsInPlay}
-            personalitiesHome={opponent.personalitiesHome}
-            specialsInPlay={opponent.specialsInPlay}
-            isOpponent
-            turnPhase={turnPhase}
-            defenderAssignments={defenderAssignments}
-            validBattleTargets={validBattleTargets}
-            onSelectBattleTarget={handleSelectBattleTarget}
-            {...pp}
-          />
+          {/* OPPONENT half — glows when it's the opponent's turn */}
+          <div className={[
+            'flex flex-col gap-1 flex-1 min-h-0 rounded-lg transition-all duration-300',
+            activePlayer === 'opponent'
+              ? 'ring-1 ring-amber-500/40 shadow-[inset_0_0_24px_rgba(245,158,11,0.06)]'
+              : '',
+          ].join(' ')}>
+            <GameRow
+              player={opponent}
+              isOpponent
+              onOpenDeckBrowser={handleOpenDeckBrowser}
+              incomingAttacks={battleAssignments}
+              attackerPersonalities={player.personalitiesHome}
+              {...pp}
+            />
+            <InPlayRow
+              holdingsInPlay={opponent.holdingsInPlay}
+              personalitiesHome={opponent.personalitiesHome}
+              specialsInPlay={opponent.specialsInPlay}
+              isOpponent
+              turnPhase={turnPhase}
+              defenderAssignments={defenderAssignments}
+              validBattleTargets={validBattleTargets}
+              onSelectBattleTarget={handleSelectBattleTarget}
+              {...pp}
+            />
+          </div>
 
           {/* ── Battlefield divider / BattleStrip ───────────────── */}
           {turnPhase === 'attack' ? (
@@ -389,6 +404,7 @@ export function Board({ player, opponent, activePlayer, onReset, multiplayerMode
               playerPersonalities={player.personalitiesHome}
               opponentPersonalities={opponent.personalitiesHome}
               opponentProvinces={opponent.provinces}
+              onEndAttackPhase={endAttackPhase}
             />
           ) : (
             <div className="flex items-center gap-2 flex-shrink-0">
@@ -398,31 +414,36 @@ export function Board({ player, opponent, activePlayer, onReset, multiplayerMode
             </div>
           )}
 
-          {/* PLAYER — in-play row (compact, fixed) */}
-          <InPlayRow
-            holdingsInPlay={player.holdingsInPlay}
-            personalitiesHome={player.personalitiesHome}
-            specialsInPlay={player.specialsInPlay}
-            turnPhase={turnPhase}
-            battleAssignments={battleAssignments}
-            opponentProvinces={opponent.provinces}
-            validAttachTargets={validAttachTargets}
-            onSelectAttachTarget={handleSelectAttachTarget}
-            selectedAttachTarget={playState?.targetId ?? null}
-            onBattleKeywordTrigger={handleBattleKeywordTrigger}
-            onManualAbility={handleManualAbility}
-            {...pp}
-          />
-
-          {/* PLAYER — bottom GameRow (flex-1, grows) */}
-          <GameRow
-            player={player}
-            onOpenDeckBrowser={handleOpenDeckBrowser}
-            onPlayCard={handlePlayCard}
-            onManualPlay={handleManualPlay}
-            onPlayRingPermanent={handlePlayRingPermanent}
-            {...pp}
-          />
+          {/* PLAYER half — glows when it's the player's turn */}
+          <div className={[
+            'flex flex-col gap-1 flex-1 min-h-0 rounded-lg transition-all duration-300',
+            activePlayer === 'player'
+              ? 'ring-1 ring-sky-500/40 shadow-[inset_0_0_24px_rgba(14,165,233,0.06)]'
+              : '',
+          ].join(' ')}>
+            <InPlayRow
+              holdingsInPlay={player.holdingsInPlay}
+              personalitiesHome={player.personalitiesHome}
+              specialsInPlay={player.specialsInPlay}
+              turnPhase={turnPhase}
+              battleAssignments={battleAssignments}
+              opponentProvinces={opponent.provinces}
+              validAttachTargets={validAttachTargets}
+              onSelectAttachTarget={handleSelectAttachTarget}
+              selectedAttachTarget={playState?.targetId ?? null}
+              onBattleKeywordTrigger={handleBattleKeywordTrigger}
+              onManualAbility={handleManualAbility}
+              {...pp}
+            />
+            <GameRow
+              player={player}
+              onOpenDeckBrowser={handleOpenDeckBrowser}
+              onPlayCard={handlePlayCard}
+              onManualPlay={handleManualPlay}
+              onPlayRingPermanent={handlePlayRingPermanent}
+              {...pp}
+            />
+          </div>
 
         </div>
       </div>
