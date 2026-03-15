@@ -1,4 +1,4 @@
-import type { CardInstance, NormalizedCard, ZoneId } from '../types/cards';
+import type { CardInstance, NormalizedCard, PlayerState, ZoneId } from '../types/cards';
 import type { TurnPhase } from '../store/gameStore';
 
 // ─── Timing & play validation ────────────────────────────────────────────────
@@ -407,4 +407,56 @@ export function calcEffectiveChi(p: CardInstance): number {
   const itemBonus = p.attachments.reduce((sum, a) => sum + (Number(a.card.chi) || 0), 0);
   const tokenBonus = p.tokens.reduce((s, t) => s + (t.chi ?? 0), 0);
   return baseChi + itemBonus + tokenBonus;
+}
+
+/**
+ * Compute the effective gold cost for a card.
+ *
+ * Applies (in order):
+ *  1. Clan discount: −2g when `applyDiscount` is true and the card's clan
+ *     matches the player's stronghold clan. This is a player-chosen action,
+ *     not auto-applied — pass `applyDiscount: true` only when the player
+ *     explicitly triggers it.
+ *
+ * Returns a value ≥ 0. Add future cost-reduction effects here so every
+ * code path that pays for a card uses a single source of truth.
+ *
+ * @param applyDiscount  Whether to apply the 2g same-clan discount (optional, default false).
+ */
+export function calcEffectiveCost(
+  card: NormalizedCard,
+  player: Pick<PlayerState, 'stronghold'>,
+  { applyDiscount = false }: { applyDiscount?: boolean } = {},
+): number {
+  const base = Math.max(0, Number(card.cost) || 0);
+  const cardClan   = card.clan?.toLowerCase() ?? '';
+  const playerClan = (player.stronghold?.clan ?? '').toLowerCase();
+  const canDiscount = Boolean(cardClan && playerClan && cardClan === playerClan);
+  const discount    = applyDiscount && canDiscount ? 2 : 0;
+  return Math.max(0, base - discount);
+}
+
+/**
+ * Compute the effective province strength for a single province.
+ *
+ * Adds:
+ *  - Base province strength (from stronghold + sensei modifier).
+ *  - Fortification bonus: unbowed Fortification holdings whose
+ *    `fortificationProvince` equals this province's index.
+ *
+ * This is the value that an attacker must exceed (plus defending Force)
+ * in order to break the province.
+ */
+export function calcProvinceStrength(
+  provinceIndex: number,
+  defender: Pick<PlayerState, 'provinceStrength' | 'holdingsInPlay'>,
+): number {
+  const fortBonus = defender.holdingsInPlay
+    .filter(h =>
+      h.fortificationProvince === provinceIndex &&
+      !h.bowed &&
+      h.card.keywords.some(k => k.toLowerCase() === 'fortification'),
+    )
+    .reduce((sum, h) => sum + Math.max(0, Number(h.card.force) || 0), 0);
+  return defender.provinceStrength + fortBonus;
 }

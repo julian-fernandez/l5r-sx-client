@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import type { BattleAssignment, CardInstance, LogCategory, LogEntry, NormalizedCard, ParsedDeck, PlayerState, Province, ZoneId } from '../types/cards';
-import { calcUnitForce, calcFollowerForce, createInstance, expandDeck, shuffle, isConquerorUnit, calcEffectiveChi, hasRepeatableAbility } from '../engine/gameActions';
+import { calcUnitForce, calcFollowerForce, createInstance, expandDeck, shuffle, isConquerorUnit, calcEffectiveChi, hasRepeatableAbility, calcEffectiveCost, calcProvinceStrength } from '../engine/gameActions';
 import type { BattleKeywordType } from '../engine/gameActions';
 import { parseDeck } from '../engine/deckParser';
 import { applyMidGameState, UNICORN_TEST_DECK, PHOENIX_TEST_DECK } from '../engine/testFixtures';
@@ -105,9 +105,12 @@ interface GameStore {
   gameLog: LogEntry[];
   /**
    * Set when the game ends. null = game is still in progress.
-   * reason: 'honor' = Honor victory (40+); 'dishonor' = Dishonor defeat (≤ −20).
+   *   'honor'        — Family Honor reached ≥ 40.
+   *   'dishonor'     — Family Honor dropped to ≤ −20.
+   *   'military'     — All 4 opponent provinces broken.
+   *   'enlightenment'— 5 Rings with distinct elemental keywords in play.
    */
-  gameResult: { winner: 'player' | 'opponent'; reason: 'honor' | 'dishonor' | 'enlightenment' } | null;
+  gameResult: { winner: 'player' | 'opponent'; reason: 'honor' | 'dishonor' | 'military' | 'enlightenment' } | null;
   /**
    * Who currently holds the Imperial Favor. Starts null (uncontrolled).
    * Gained via the Lobby player ability; spent by Rulebook Favor actions.
@@ -348,6 +351,23 @@ interface GameStore {
    * loses Family Honor equal to the personality's printed Personal Honor.
    */
   dishonorPersonality: (instanceId: string, target: 'player' | 'opponent') => void;
+
+  // ── Honor & Victory ───────────────────────────────────────────────────────────
+  /**
+   * Gain Family Honor and immediately check all victory conditions.
+   * Preferred over raw familyHonor mutations for card effects.
+   */
+  gainHonor: (amount: number, target: 'player' | 'opponent', reason?: string) => void;
+  /**
+   * Lose Family Honor and immediately check all victory conditions.
+   * Preferred over raw familyHonor mutations for card effects.
+   */
+  loseHonor: (amount: number, target: 'player' | 'opponent', reason?: string) => void;
+  /**
+   * Check all four victory conditions and set gameResult if any is met.
+   * Safe to call speculatively — exits immediately if the game is already over.
+   */
+  checkVictoryConditions: () => void;
 
   // ── Token system ─────────────────────────────────────────────────────────────
   /**
@@ -847,9 +867,7 @@ export const useGameStore = create<GameStore>((set, get) => {
       }
     }
 
-    const baseCost    = Math.max(0, Number(inst.card.cost) || 0);
-    const discountAmt = discount ? 2 : 0;
-    const finalCost   = Math.max(0, baseCost - discountAmt);
+    const finalCost = calcEffectiveCost(inst.card, ps, { applyDiscount: discount });
 
     if (ps.goldPool < finalCost) return;
 
@@ -1048,16 +1066,9 @@ export const useGameStore = create<GameStore>((set, get) => {
     if (turnPhase === 'end') {
       if (ps.hand.length > HAND_LIMIT) return;
 
-      // ── Victory condition: Dishonor (≤ −20) at end of active player's turn ──
-      if (ps.familyHonor <= -20) {
-        const winner: 'player' | 'opponent' = activePlayer === 'player' ? 'opponent' : 'player';
-        pushLog(
-          `${activePlayer === 'player' ? 'You have' : 'Opponent has'} reached −20 Honor — Dishonor defeat!`,
-          'honor', 'system',
-        );
-        set({ gameResult: { winner, reason: 'dishonor' } });
-        return;
-      }
+      // ── Victory conditions checked at end of active player's turn ──
+      get().checkVictoryConditions();
+      if (get().gameResult) return;
 
       const newActive: 'player' | 'opponent' = activePlayer === 'player' ? 'opponent' : 'player';
       const incoming = st[newActive];
@@ -1733,29 +1744,25 @@ export const useGameStore = create<GameStore>((set, get) => {
         const defenders = opponent.personalitiesHome.filter(p => defenderIds.includes(p.instanceId));
         const defendingForce = defenders.reduce((sum, p) => sum + calcUnitForce(p, true), 0);
 
-        // Fortification: holdings with the Fortification keyword add their Force to this province's defense
-        const fortificationForce = opponent.holdingsInPlay
-          .filter(h =>
-            h.fortificationProvince === provinceIndex &&
-            h.card.keywords.some(k => k.toLowerCase().trim() === 'fortification'),
-          )
-          .reduce((sum, h) => sum + Math.max(0, Number(h.card.force) || 0), 0);
-
-        if (fortificationForce > 0) {
-          pushLog(`Fortification adds ${fortificationForce}F to Province ${provinceIndex + 1} defense`, 'battle', 'system');
+        // Province strength: base + unbowed Fortification bonus (via shared utility)
+        const effProvinceStrength = calcProvinceStrength(provinceIndex, opponent);
+        const fortBonus = effProvinceStrength - opponent.provinceStrength;
+        if (fortBonus > 0) {
+          pushLog(`Fortification adds ${fortBonus}F to Province ${provinceIndex + 1} defense`, 'battle', 'system');
         }
+
         // Battle outcome: army force determines win/loss; province strength only affects province break.
         // Tie = equal force with units on both sides.
         const isTie        = attackingForce === defendingForce && attackers.length > 0 && defenders.length > 0;
         const attackerWins = !isTie && attackingForce > defendingForce;
         // Province breaks only when attacker wins AND their force exceeds defending force + province strength
-        const isBreached   = attackerWins && attackingForce > (defendingForce + opponent.provinceStrength + fortificationForce);
+        const isBreached   = attackerWins && attackingForce > (defendingForce + effProvinceStrength);
 
         const outcomeLabel = isTie        ? `TIE (${attackingForce}F each)`
           : attackerWins
             ? (isBreached
-                ? `Attacker wins — Province ${provinceIndex + 1} BROKEN! (${attackingForce}F att vs ${defendingForce}F def + ${opponent.provinceStrength}s prov)`
-                : `Attacker wins — province holds (${attackingForce}F att vs ${defendingForce}F def, prov needs >${opponent.provinceStrength + defendingForce})`)
+                ? `Attacker wins — Province ${provinceIndex + 1} BROKEN! (${attackingForce}F att vs ${defendingForce}F def + ${effProvinceStrength}s prov)`
+                : `Attacker wins — province holds (${attackingForce}F att vs ${defendingForce}F def, prov needs >${effProvinceStrength + defendingForce})`)
             : `Defenders hold (${defendingForce}F def > ${attackingForce}F att)`;
         pushLog(outcomeLabel, 'phase', 'system');
 
@@ -1963,6 +1970,7 @@ export const useGameStore = create<GameStore>((set, get) => {
             player:   newPlayer,
           });
         }
+        get().checkVictoryConditions();
       }
     } else {
       pushLog(`${sideLabel} passed in the ${battleStage === 'engage' ? 'Engage' : 'Battle'} window`, 'priority', side);
@@ -2095,32 +2103,47 @@ export const useGameStore = create<GameStore>((set, get) => {
         });
       } else {
         // Melee / Ranged — kill the personality
-        const attachments = tgt.attachments;
-        const isDishonored = tgt.dishonored;
-        const phLoss = isDishonored ? Math.max(0, Number(tgt.card.personalHonor) || 0) : 0;
+        const attachments   = tgt.attachments;
+        const tgtDishonored = tgt.dishonored;
+        const phLoss = tgtDishonored ? Math.max(0, Number(tgt.card.personalHonor) || 0) : 0;
         pushLog(
-          `${src.card.name} ${typeLabel} ${value} → killed ${tgt.card.name}${isDishonored ? ' ☠' : ''}`,
+          `${src.card.name} ${typeLabel} ${value} → killed ${tgt.card.name}${tgtDishonored ? ' ☠' : ''}`,
           'battle', 'player',
         );
-        pushLog(`You gain 2 Honor for killing ${tgt.card.name}`, 'honor', 'player');
+
+        // Rehonoring: if the killing personality is dishonorable, rehonor it
+        // instead of granting the 2 Honor kill reward
+        let newPlayerHonor = player.familyHonor;
+        let newPlayerPs    = player.personalitiesHome;
+        if (src.dishonored) {
+          pushLog(`${src.card.name} rehonors (substitutes for 2 Honor kill reward)`, 'honor', 'player');
+          newPlayerPs = player.personalitiesHome.map(p =>
+            p.instanceId === sourceId ? { ...p, dishonored: false } : p,
+          );
+        } else {
+          pushLog(`You gain 2 Honor for killing ${tgt.card.name}`, 'honor', 'player');
+          newPlayerHonor += 2;
+        }
+
         if (phLoss > 0) {
           pushLog(`Opponent loses ${phLoss} Honor (${tgt.card.name} dishonorably dead)`, 'honor', 'opponent');
         }
         set({
-          player: { ...player, familyHonor: player.familyHonor + 2 },
+          player: { ...player, familyHonor: newPlayerHonor, personalitiesHome: newPlayerPs },
           opponent: {
             ...opponent,
             familyHonor: opponent.familyHonor - phLoss,
             personalitiesHome: opponent.personalitiesHome.filter(p => p.instanceId !== targetId),
-            honorablyDead: isDishonored
+            honorablyDead: tgtDishonored
               ? opponent.honorablyDead
               : [{ ...tgt, attachments: [] }, ...opponent.honorablyDead],
-            dishonorablelyDead: isDishonored
+            dishonorablelyDead: tgtDishonored
               ? [{ ...tgt, attachments: [] }, ...opponent.dishonorablelyDead]
               : opponent.dishonorablelyDead,
             fateDiscard: [...attachments, ...opponent.fateDiscard],
           },
         });
+        get().checkVictoryConditions();
       }
     }
   },
@@ -2244,25 +2267,8 @@ export const useGameStore = create<GameStore>((set, get) => {
       specialsInPlay: newSpecials,
     };
 
-    // Enlightenment: 5 rings with 5 distinct elemental keywords in specialsInPlay
-    const ELEMENTS = new Set(['air', 'earth', 'fire', 'water', 'void']);
-    const ringElements = new Set<string>();
-    for (const c of newSpecials) {
-      if (c.card.type !== 'ring') continue;
-      // False Rings and rings that say "does not count towards" are excluded
-      if (/does not count towards.*enlightenment/i.test(c.card.text)) continue;
-      for (const kw of c.card.keywords) {
-        const lc = kw.toLowerCase().trim();
-        if (ELEMENTS.has(lc)) ringElements.add(lc);
-      }
-    }
-    if (ringElements.size >= 5) {
-      pushLog('You control five Rings with different elemental keywords — Enlightenment Victory!', 'honor', 'system');
-      set({ player: newPlayer, gameResult: { winner: 'player', reason: 'enlightenment' } });
-      return;
-    }
-
     set({ player: newPlayer });
+    get().checkVictoryConditions();
   },
 
   dishonorPersonality: (instanceId, target) => {
@@ -2284,6 +2290,94 @@ export const useGameStore = create<GameStore>((set, get) => {
         ),
       },
     });
+  },
+
+  // ── Honor & Victory ───────────────────────────────────────────────────────────
+
+  checkVictoryConditions: () => {
+    if (get().gameResult) return; // already ended — don't overwrite
+    const { player, opponent } = get();
+
+    // Honor victory: ≥ 40 Family Honor
+    if (player.familyHonor >= 40) {
+      pushLog('You reached 40 Honor — Honor Victory!', 'honor', 'system');
+      set({ gameResult: { winner: 'player', reason: 'honor' } });
+      return;
+    }
+    if (opponent.familyHonor >= 40) {
+      pushLog('Opponent reached 40 Honor — Honor Victory!', 'honor', 'system');
+      set({ gameResult: { winner: 'opponent', reason: 'honor' } });
+      return;
+    }
+
+    // Dishonor defeat: ≤ −20 Family Honor
+    if (player.familyHonor <= -20) {
+      pushLog('You reached −20 Honor — Dishonor defeat!', 'honor', 'system');
+      set({ gameResult: { winner: 'opponent', reason: 'dishonor' } });
+      return;
+    }
+    if (opponent.familyHonor <= -20) {
+      pushLog('Opponent reached −20 Honor — Dishonor defeat!', 'honor', 'system');
+      set({ gameResult: { winner: 'player', reason: 'dishonor' } });
+      return;
+    }
+
+    // Military victory: all 4 opponent provinces broken
+    if (player.provinces.every(p => p.broken)) {
+      pushLog('All your provinces have fallen — Military defeat!', 'battle', 'system');
+      set({ gameResult: { winner: 'opponent', reason: 'military' } });
+      return;
+    }
+    if (opponent.provinces.every(p => p.broken)) {
+      pushLog("All opponent's provinces have fallen — Military Victory!", 'battle', 'system');
+      set({ gameResult: { winner: 'player', reason: 'military' } });
+      return;
+    }
+
+    // Enlightenment victory: 5 rings each with a distinct elemental keyword
+    // Rings whose text says "does not count towards enlightenment" are excluded.
+    const ELEMENTS = new Set(['air', 'earth', 'fire', 'water', 'void']);
+    const countElements = (specials: CardInstance[]) => {
+      const found = new Set<string>();
+      for (const c of specials) {
+        if (c.card.type !== 'ring') continue;
+        if (/does not count towards.*enlightenment/i.test(c.card.text)) continue;
+        for (const kw of c.card.keywords) {
+          const lc = kw.toLowerCase().trim();
+          if (ELEMENTS.has(lc)) found.add(lc);
+        }
+      }
+      return found.size;
+    };
+
+    if (countElements(player.specialsInPlay) >= 5) {
+      pushLog('You hold all five elemental Rings — Enlightenment Victory!', 'honor', 'system');
+      set({ gameResult: { winner: 'player', reason: 'enlightenment' } });
+      return;
+    }
+    if (countElements(opponent.specialsInPlay) >= 5) {
+      pushLog('Opponent holds all five elemental Rings — Enlightenment Victory!', 'honor', 'system');
+      set({ gameResult: { winner: 'opponent', reason: 'enlightenment' } });
+      return;
+    }
+  },
+
+  gainHonor: (amount, target, reason) => {
+    if (amount <= 0) return;
+    const ps = get()[target];
+    const who = target === 'player' ? 'You' : 'Opponent';
+    pushLog(`${who} gain${amount === 1 ? 's' : ''} ${amount} Honor${reason ? ` (${reason})` : ''}`, 'honor', target);
+    set({ [target]: { ...ps, familyHonor: ps.familyHonor + amount } });
+    get().checkVictoryConditions();
+  },
+
+  loseHonor: (amount, target, reason) => {
+    if (amount <= 0) return;
+    const ps = get()[target];
+    const who = target === 'player' ? 'You' : 'Opponent';
+    pushLog(`${who} lose${amount === 1 ? 's' : ''} ${amount} Honor${reason ? ` (${reason})` : ''}`, 'honor', target);
+    set({ [target]: { ...ps, familyHonor: ps.familyHonor - amount } });
+    get().checkVictoryConditions();
   },
 
   // ── Token system ─────────────────────────────────────────────────────────────
@@ -2350,7 +2444,12 @@ export const useGameStore = create<GameStore>((set, get) => {
         .filter(a => ['item', 'follower', 'spell'].includes(a.card.type))
         .map(a => ({ ...a, location: 'fateDiscard' as import('../types/cards').ZoneId }));
 
+      // Expendable: controller draws a Fate card when this personality is destroyed
+      const isExpendable = personality.card.keywords.some(k => k.toLowerCase() === 'expendable');
+      const [drawnCard, ...restDeck] = isExpendable ? ps.fateDeck : [null as never, ...ps.fateDeck];
+
       pushLog(`${who} ${personality.card.name} is destroyed (→ ${isDishonored ? 'Dishonorably' : 'Honorably'} Dead)`, 'battle', target);
+      if (isExpendable) pushLog(`${who} ${personality.card.name} Expendable — draw a Fate card`, 'draw', target);
       if (target === 'player') relay({ type: 'destroy-card', instanceId });
       set({
         [target]: {
@@ -2359,8 +2458,13 @@ export const useGameStore = create<GameStore>((set, get) => {
           personalitiesHome: ps.personalitiesHome.filter(p => p.instanceId !== instanceId),
           [deadPile]: [...ps[deadPile], { ...personality, location: deadPile as import('../types/cards').ZoneId }],
           fateDiscard: [...ps.fateDiscard, ...attachFateDiscard],
+          ...(isExpendable && drawnCard ? {
+            hand: [...ps.hand, { ...drawnCard, location: 'hand' as import('../types/cards').ZoneId }],
+            fateDeck: restDeck,
+          } : {}),
         },
       });
+      if (phLoss > 0) get().checkVictoryConditions();
       return;
     }
 
