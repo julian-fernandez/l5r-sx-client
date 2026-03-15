@@ -1,6 +1,6 @@
 import { create } from 'zustand';
-import type { BattleAssignment, CardInstance, LogCategory, LogEntry, NormalizedCard, ParsedDeck, PlayerState, Province, ZoneId } from '../types/cards';
-import { calcUnitForce, calcFollowerForce, createInstance, expandDeck, shuffle, isConquerorUnit, calcEffectiveChi, hasRepeatableAbility, calcEffectiveCost, calcProvinceStrength, findReactionCandidates } from '../engine/gameActions';
+import type { BattleAssignment, CardInstance, LogCategory, LogEntry, NormalizedCard, ParsedDeck, PlayerState, Province, TargetFilter, ValidTarget, ZoneId } from '../types/cards';
+import { calcUnitForce, calcFollowerForce, createInstance, expandDeck, shuffle, isConquerorUnit, calcEffectiveChi, hasRepeatableAbility, calcEffectiveCost, calcProvinceStrength, findReactionCandidates, getValidTargets } from '../engine/gameActions';
 import type { BattleKeywordType, TriggerType, TriggerContext, ReactionCandidate } from '../engine/gameActions';
 import { parseDeck } from '../engine/deckParser';
 import { applyMidGameState, UNICORN_TEST_DECK, PHOENIX_TEST_DECK } from '../engine/testFixtures';
@@ -13,6 +13,12 @@ import type { SerializedAction } from '../../server/src/types';
 let _relayFn: ((a: SerializedAction) => void) | null = null;
 /** Prevents echo: while applyRelayedAction is running, don't re-relay. */
 let _suppressRelay = false;
+
+// ─── Module-level targeting callback ──────────────────────────────────────────
+// Stored outside Zustand (non-serialisable function) alongside pendingTarget.
+// requestTarget() sets it; resolveTarget() calls it then nulls it.
+
+let _targetCallback: ((target: ValidTarget) => void) | null = null;
 
 function relay(action: SerializedAction): void {
   if (_relayFn && !_suppressRelay) _relayFn(action);
@@ -126,6 +132,25 @@ interface GameStore {
     context: import('../engine/gameActions').TriggerContext;
     /** Candidates from BOTH sides (player + opponent) */
     candidates: import('../engine/gameActions').ReactionCandidate[];
+  } | null;
+
+  /**
+   * Non-null while the engine is waiting for the local player to click a target.
+   * The UI should enter "targeting mode" (highlight valid cards, show prompt label)
+   * and call resolveTarget() when the player clicks a valid card.
+   * cancelTarget() aborts the effect without applying it.
+   *
+   * `validTargetIds` is pre-computed by requestTarget() so the UI can highlight
+   * without re-running the filter on every render.
+   */
+  pendingTarget: {
+    filter: TargetFilter;
+    label: string;
+    /** Pre-computed set of valid target instanceIds for fast UI lookups. */
+    validTargetIds: Set<string>;
+    /** Full ValidTarget entries (include side + province metadata). */
+    validTargets: ValidTarget[];
+    allowCancel: boolean;
   } | null;
 
   setCatalogLoaded: (loaded: boolean) => void;
@@ -494,6 +519,36 @@ interface GameStore {
    */
   rehonorPersonality: (instanceId: string, target?: 'player' | 'opponent') => void;
 
+  // ── Targeting system ──────────────────────────────────────────────────────────
+  /**
+   * Ask the local player to select one card from those matching `filter`.
+   * Sets `pendingTarget` and stores `callback` in a module-level variable.
+   * The UI should enter targeting mode: highlight valid cards and show `label`.
+   * When the player clicks a valid card, `resolveTarget()` fires the callback.
+   *
+   * This is intentionally NOT relayed — the calling effect is responsible for
+   * relaying the resulting action (e.g. bowCard already relays internally).
+   */
+  requestTarget: (
+    filter: TargetFilter,
+    label: string,
+    callback: (target: ValidTarget) => void,
+    allowCancel?: boolean,
+  ) => void;
+  /**
+   * Called by the UI when the player clicks a valid target card.
+   * Validates the click against pendingTarget.validTargetIds, fires the stored
+   * callback with full ValidTarget metadata, then clears pendingTarget.
+   * No-ops if the clicked card is not in the valid set.
+   */
+  resolveTarget: (instanceId: string) => void;
+  /**
+   * Abort the current targeting request without applying any effect.
+   * Clears pendingTarget and discards the stored callback.
+   * Only available when pendingTarget.allowCancel is true.
+   */
+  cancelTarget: () => void;
+
   // ── Multiplayer ─────────────────────────────────────────────────────────────
   /** Enter lobby phase (shows MultiplayerLobby component). */
   enterLobby: () => void;
@@ -737,6 +792,7 @@ export const useGameStore = create<GameStore>((set, get) => {
   gameResult: null,
   imperialFavor: null,
   pendingReaction: null,
+  pendingTarget: null,
   battleAssignments: [],
   defenderAssignments: [],
   battleStage: null,
@@ -2975,6 +3031,48 @@ export const useGameStore = create<GameStore>((set, get) => {
     set({ [target]: { ...ps, personalitiesHome: updated } });
   },
 
+  // ── Targeting system ──────────────────────────────────────────────────────────
+
+  requestTarget: (filter, label, callback, allowCancel = true) => {
+    const { player, opponent, battleAssignments, defenderAssignments } = get();
+    const validTargets = getValidTargets(filter, player, opponent, battleAssignments, defenderAssignments);
+    if (validTargets.length === 0) {
+      // No valid targets — call back with a no-op sentinel so effects can handle "no target" gracefully
+      pushLog(`No valid targets for: ${label}`, 'other', 'system');
+      return;
+    }
+    _targetCallback = callback;
+    set({
+      pendingTarget: {
+        filter,
+        label,
+        validTargetIds: new Set(validTargets.map(t => t.instanceId)),
+        validTargets,
+        allowCancel,
+      },
+    });
+  },
+
+  resolveTarget: (instanceId) => {
+    const { pendingTarget } = get();
+    if (!pendingTarget) return;
+    if (!pendingTarget.validTargetIds.has(instanceId)) return; // not a valid target — ignore
+    const target = pendingTarget.validTargets.find(t => t.instanceId === instanceId);
+    if (!target) return;
+    const cb = _targetCallback;
+    _targetCallback = null;
+    set({ pendingTarget: null });
+    cb?.(target);
+  },
+
+  cancelTarget: () => {
+    const { pendingTarget } = get();
+    if (!pendingTarget?.allowCancel) return;
+    _targetCallback = null;
+    set({ pendingTarget: null });
+    pushLog('Targeting cancelled', 'other', 'system');
+  },
+
   // ── Multiplayer ─────────────────────────────────────────────────────────────
 
   enterLobby: () => set({ phase: 'lobby', multiplayerMode: true }),
@@ -2998,6 +3096,7 @@ export const useGameStore = create<GameStore>((set, get) => {
       gameResult: null,
       imperialFavor: null,
       pendingReaction: null,
+      pendingTarget: null,
       battleAssignments: [],
       defenderAssignments: [],
       battleStage: null,
@@ -3006,6 +3105,7 @@ export const useGameStore = create<GameStore>((set, get) => {
       battleWindowPasses: 0,
       cyclingActive: null,
     });
+    _targetCallback = null;
   },
 
   setRelayCallback: (fn) => { _relayFn = fn; },

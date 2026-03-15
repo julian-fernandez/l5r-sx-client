@@ -1,4 +1,4 @@
-import type { CardInstance, NormalizedCard, PlayerState, ZoneId } from '../types/cards';
+import type { BattleAssignment, CardInstance, NormalizedCard, PlayerState, Province, TargetFilter, ValidTarget, ZoneId } from '../types/cards';
 import type { TurnPhase } from '../store/gameStore';
 
 // ─── Timing & play validation ────────────────────────────────────────────────
@@ -673,17 +673,159 @@ export function isOpposed(
  */
 export function getPersonalitiesAtProvince(
   provinceIndex: number,
-  battleAssignments: Record<number, string[]>,
-  defenderAssignments: Record<number, string[]>,
+  battleAssignments: BattleAssignment[],
+  defenderAssignments: BattleAssignment[],
   player: Pick<PlayerState, 'personalitiesHome'>,
   opponent: Pick<PlayerState, 'personalitiesHome'>,
 ): { attackers: CardInstance[]; defenders: CardInstance[] } {
-  const attackerIds  = battleAssignments[provinceIndex]  ?? [];
-  const defenderIds  = defenderAssignments[provinceIndex] ?? [];
-  const allPlayer    = player.personalitiesHome;
-  const allOpponent  = opponent.personalitiesHome;
+  const attackerIds = battleAssignments
+    .filter(a => a.provinceIndex === provinceIndex)
+    .map(a => a.instanceId);
+  const defenderIds = defenderAssignments
+    .filter(a => a.provinceIndex === provinceIndex)
+    .map(a => a.instanceId);
   return {
-    attackers: allPlayer.filter(p => attackerIds.includes(p.instanceId)),
-    defenders: allOpponent.filter(p => defenderIds.includes(p.instanceId)),
+    attackers: player.personalitiesHome.filter(p => attackerIds.includes(p.instanceId)),
+    defenders: opponent.personalitiesHome.filter(p => defenderIds.includes(p.instanceId)),
   };
+}
+
+// ─── Targeting system ────────────────────────────────────────────────────────
+
+/**
+ * Enumerate every card that satisfies `filter` given the current game state.
+ *
+ * This is a pure function — call it from the store to validate targets or
+ * from the UI to determine which cards should be highlighted.
+ *
+ * The returned array contains one entry per valid target, including province
+ * cards when `filter.zones` includes `'provinces'`.
+ */
+export function getValidTargets(
+  filter: TargetFilter,
+  player: PlayerState,
+  opponent: PlayerState,
+  battleAssignments: BattleAssignment[],
+  defenderAssignments: BattleAssignment[],
+): ValidTarget[] {
+  const results: ValidTarget[] = [];
+
+  const sides: Array<'player' | 'opponent'> =
+    filter.side === 'player'   ? ['player']
+    : filter.side === 'opponent' ? ['opponent']
+    : ['player', 'opponent'];
+
+  const defaultZones: TargetFilter['zones'] = [
+    'personalitiesHome',
+    'holdingsInPlay',
+    'specialsInPlay',
+  ];
+  const zones = filter.zones ?? defaultZones;
+
+  // Utility: check a single CardInstance against the filter
+  const matches = (inst: CardInstance, side: 'player' | 'opponent'): boolean => {
+    if (filter.exclude?.includes(inst.instanceId)) return false;
+
+    if (filter.cardType) {
+      const types = Array.isArray(filter.cardType) ? filter.cardType : [filter.cardType];
+      const t = (inst.card.type ?? '').toLowerCase();
+      if (!types.some(ct => ct.toLowerCase() === t)) return false;
+    }
+
+    if (filter.keywords) {
+      if (!filter.keywords.every(kw => hasEffectiveKeyword(inst, kw))) return false;
+    }
+
+    if (filter.bowed !== undefined && inst.bowed !== filter.bowed) return false;
+    if (filter.dishonored !== undefined && (inst.dishonored ?? false) !== filter.dishonored) return false;
+
+    if (filter.atBattlefield !== undefined) {
+      const inBA = battleAssignments.some(
+        a => a.instanceId === inst.instanceId && a.provinceIndex === filter.atBattlefield,
+      );
+      const inDA = defenderAssignments.some(
+        a => a.instanceId === inst.instanceId && a.provinceIndex === filter.atBattlefield,
+      );
+      if (!inBA && !inDA) return false;
+    }
+
+    if (filter.atHome) {
+      const inAny =
+        battleAssignments.some(a => a.instanceId === inst.instanceId) ||
+        defenderAssignments.some(a => a.instanceId === inst.instanceId);
+      if (inAny) return false;
+    }
+
+    if (filter.minForce !== undefined || filter.maxForce !== undefined) {
+      const f = calcUnitForce(inst, false);
+      if (filter.minForce !== undefined && f < filter.minForce) return false;
+      if (filter.maxForce !== undefined && f > filter.maxForce) return false;
+    }
+
+    if (filter.minChi !== undefined || filter.maxChi !== undefined) {
+      const c = calcEffectiveChi(inst);
+      if (filter.minChi !== undefined && c < filter.minChi) return false;
+      if (filter.maxChi !== undefined && c > filter.maxChi) return false;
+    }
+
+    if (filter.minPH !== undefined) {
+      const ph = Number(inst.card.personalHonor) || 0;
+      if (ph < filter.minPH) return false;
+    }
+
+    if (filter.custom && !filter.custom(inst, side)) return false;
+
+    return true;
+  };
+
+  for (const side of sides) {
+    const ps = side === 'player' ? player : opponent;
+
+    // Flat in-play zones
+    const zoneMap: Partial<Record<NonNullable<TargetFilter['zones']>[number], CardInstance[]>> = {
+      personalitiesHome: ps.personalitiesHome,
+      holdingsInPlay:    ps.holdingsInPlay,
+      specialsInPlay:    ps.specialsInPlay,
+      hand:              ps.hand,
+      dynastyDiscard:    ps.dynastyDiscard,
+      fateDiscard:       ps.fateDiscard,
+    };
+
+    for (const zone of zones) {
+      if (zone === 'provinces') continue; // handled separately below
+
+      const arr = zoneMap[zone];
+      if (!arr) continue;
+
+      for (const inst of arr) {
+        if (matches(inst, side)) {
+          results.push({ instanceId: inst.instanceId, side });
+        }
+        // Also check attachments when searching personality zones
+        if (zone === 'personalitiesHome') {
+          for (const att of inst.attachments) {
+            if (matches(att, side)) {
+              results.push({ instanceId: att.instanceId, side });
+            }
+          }
+        }
+      }
+    }
+
+    // Province cards (face-up dynasty cards sitting in provinces)
+    if (zones.includes('provinces')) {
+      ps.provinces.forEach((prov: Province, idx: number) => {
+        if (prov.card && prov.faceUp && matches(prov.card, side)) {
+          results.push({
+            instanceId: prov.card.instanceId,
+            side,
+            isProvinceCard: true,
+            provinceIndex: idx,
+          });
+        }
+      });
+    }
+  }
+
+  return results;
 }

@@ -171,6 +171,78 @@ export type ZoneId =
   | 'province3'
   | 'removed';
 
+// ─── Targeting system ────────────────────────────────────────────────────────
+
+/** Which player's cards are considered when searching for valid targets. */
+export type TargetSide = 'player' | 'opponent' | 'both';
+
+/**
+ * In-play zones that can contain targetable cards.
+ * 'provinces' targets province cards (face-up dynasty cards in provinces).
+ */
+export type TargetZone =
+  | 'personalitiesHome'
+  | 'holdingsInPlay'
+  | 'specialsInPlay'
+  | 'hand'
+  | 'dynastyDiscard'
+  | 'fateDiscard'
+  | 'provinces';
+
+/**
+ * Declarative description of which cards are legal targets for an effect.
+ * All specified criteria are ANDed together; omitted fields are unconstrained.
+ *
+ * Used by:
+ *  - requestTarget() to declare what needs selecting
+ *  - getValidTargets() to enumerate every card that satisfies the filter
+ *  - TargetingOverlay to highlight selectable cards
+ */
+export interface TargetFilter {
+  /** Which player's cards are valid (default: 'both'). */
+  side?: TargetSide;
+  /** Restrict search to specific zones (default: all in-play zones). */
+  zones?: TargetZone[];
+  /** Card type must match one of these strings (case-insensitive). */
+  cardType?: string | string[];
+  /** Card must have ALL of these keywords (uses hasEffectiveKeyword). */
+  keywords?: string[];
+  /** Filter by bow state. */
+  bowed?: boolean;
+  /** Filter by dishonored state (personalities only). */
+  dishonored?: boolean;
+  /** Only personalities currently assigned to THIS province's battlefield. */
+  atBattlefield?: number;
+  /** Only personalities NOT assigned to any battlefield (at home). */
+  atHome?: boolean;
+  /** Only personalities with Force ≥ minForce. */
+  minForce?: number;
+  /** Only personalities with Force ≤ maxForce. */
+  maxForce?: number;
+  /** Only personalities with Chi ≥ minChi. */
+  minChi?: number;
+  /** Only personalities with Chi ≤ maxChi. */
+  maxChi?: number;
+  /** Only personalities with Personal Honor ≥ minPH. */
+  minPH?: number;
+  /** Exclude cards with these instanceIds (e.g. the source card). */
+  exclude?: string[];
+  /**
+   * Arbitrary extra predicate — evaluated last, after all other criteria.
+   * Keep this pure (no side effects); it may be called many times.
+   */
+  custom?: (inst: CardInstance, side: 'player' | 'opponent') => boolean;
+}
+
+/** One entry in the list of valid targets returned by getValidTargets(). */
+export interface ValidTarget {
+  instanceId: string;
+  side: 'player' | 'opponent';
+  /** True when the target is a province card (inst lives inside a Province, not a flat array). */
+  isProvinceCard?: boolean;
+  provinceIndex?: number;
+}
+
 export interface Province {
   index: number;
   card: CardInstance | null;

@@ -1,5 +1,7 @@
 import type { NormalizedCard } from '../types/cards';
 import type { CardInstance } from '../types/cards';
+import { useGameStore } from '../store/gameStore';
+import { useIsTargetable, useIsTargeting } from './TargetingOverlay';
 import { CardImage } from './CardImage';
 
 interface Props {
@@ -34,6 +36,10 @@ export function GameCard({
   const { card } = instance;
   const canPreview = !faceDown;
 
+  const isTargeting   = useIsTargeting();
+  const isTargetable  = useIsTargetable(instance.instanceId);
+  const resolveTarget = useGameStore(s => s.resolveTarget);
+
   const handleMouseEnter = (e: React.MouseEvent) => {
     if (canPreview && onPreview) onPreview(card, e);
   };
@@ -52,26 +58,44 @@ export function GameCard({
     }
   };
 
+  const handleClick = () => {
+    // While targeting is active, clicks on valid targets resolve the target
+    // instead of triggering normal card interactions.
+    if (isTargeting) {
+      if (isTargetable) resolveTarget(instance.instanceId);
+      return;
+    }
+    onClick?.();
+  };
+
+  const handleDoubleClick = () => {
+    if (isTargeting) return; // block bow/unbow during targeting
+    onDoubleClick?.();
+  };
+
   return (
     <div
-      className={`relative select-none cursor-pointer group ${className}`}
+      className={`relative select-none group ${isTargeting && !isTargetable ? 'opacity-40' : 'cursor-pointer'} ${className}`}
       style={{
         aspectRatio: '2.5/3.5',
         ...style,
         // Rotate 90° clockwise when bowed — matches physical L5R convention.
-        // CSS transforms don't affect layout flow, so the element keeps its
-        // original footprint; the card will visually overlap its neighbours
-        // slightly when bowed, which is intentional and expected.
         transform: instance.bowed ? 'rotate(90deg)' : 'rotate(0deg)',
         transition: 'transform 0.25s ease',
       }}
-      onClick={onClick}
-      onDoubleClick={onDoubleClick}
+      onClick={handleClick}
+      onDoubleClick={handleDoubleClick}
       onMouseEnter={handleMouseEnter}
       onMouseMove={handleMouseMove}
       onMouseLeave={handleMouseLeave}
       onContextMenu={handleContextMenu}
-      title={faceDown ? 'Face-down' : `${card.name}${instance.bowed ? ' (bowed — double-click to unbow)' : ' — double-click to bow'}`}
+      title={
+        isTargetable
+          ? `Click to target: ${card.name}`
+          : faceDown
+            ? 'Face-down'
+            : `${card.name}${instance.bowed ? ' (bowed — double-click to unbow)' : ' — double-click to bow'}`
+      }
     >
       {faceDown ? (
         <FaceDownCard />
@@ -84,6 +108,12 @@ export function GameCard({
           />
           {instance.bowed && (
             <div className="absolute inset-0 rounded-lg ring-2 ring-amber-400/80 bg-amber-950/20 pointer-events-none" />
+          )}
+          {/* Targeting highlight — pulsing green ring + tint */}
+          {isTargetable && (
+            <div className="absolute inset-0 rounded-lg pointer-events-none
+                            ring-2 ring-emerald-400 shadow-[0_0_12px_2px_rgba(52,211,153,0.55)]
+                            animate-pulse bg-emerald-400/10" />
           )}
         </>
       )}

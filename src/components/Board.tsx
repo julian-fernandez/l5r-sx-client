@@ -6,6 +6,7 @@ import type { BattleKeywordType } from '../engine/gameActions';
 import { getValidAttachTargets } from './CardResolutionOverlay';
 import { ManualResolutionOverlay } from './ManualResolutionOverlay';
 import { ReactionPrompt } from './ReactionPrompt';
+import { TargetingOverlay } from './TargetingOverlay';
 import { GameRow } from './GameRow';
 import { InPlayRow } from './InPlayRow';
 import { CardPreview } from './CardPreview';
@@ -655,6 +656,7 @@ export function Board({ player, opponent, activePlayer, onReset, multiplayerMode
         </>
       )}
 
+      <TargetingOverlay />
       <ReactionPrompt />
       <CardPreview preview={preview} />
       <CardModal card={modal} onClose={() => setModal(null)} />
