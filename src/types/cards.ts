@@ -91,6 +91,23 @@ export interface NormalizedCard {
 
 // ─── Game runtime types ───────────────────────────────────────────────────────
 
+/**
+ * A discrete modifier token placed on a card by a card effect.
+ * Tokens persist until removed or the card leaves play.
+ * Examples: Corruption tokens (−1C), Fire tokens (+1F/+1C).
+ */
+export interface GameToken {
+  id: string;
+  /** Human-readable label shown in the UI (e.g. "+2F", "Corrupt", "Poison") */
+  label: string;
+  /** Force modifier (positive or negative) */
+  force?: number;
+  /** Chi modifier (positive or negative) */
+  chi?: number;
+  /** Additional keywords granted to the carrying card */
+  keywords?: string[];
+}
+
 export interface CardInstance {
   instanceId: string;      // unique per copy in play
   cardId: string;          // references NormalizedCard.id
@@ -101,6 +118,12 @@ export interface CardInstance {
   attachments: CardInstance[];
   fateTokens: number;
   honorTokens: number;
+  /**
+   * Discrete modifier tokens placed on this card by card effects.
+   * Each token may grant Force/Chi bonuses or additional keywords.
+   * Cleared automatically when the card leaves play.
+   */
+  tokens: GameToken[];
   /**
    * Temporary Force bonus granted by Tactician this battle.
    * Added to calcUnitForce; cleared when the Attack Phase ends or a new turn begins.
@@ -238,6 +261,11 @@ export interface PlayerState {
    * Reserved for future card effects; currently not populated.
    */
   dishonorablelyDead: CardInstance[];
+  /**
+   * Cards removed from the game entirely (by Discipline, card effects, etc.).
+   * Cards here are no longer in any active zone and cannot be retrieved.
+   */
+  removed: CardInstance[];
 }
 
 // ─── Game Log ────────────────────────────────────────────────────────────────

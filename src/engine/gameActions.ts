@@ -140,10 +140,12 @@ export function canPlayFromHand(
  * `personality` given the current attachments already on that personality.
  *
  * Rules enforced:
- *  - Spells   → Shugenja only
- *  - Weapons  → max 1 (or 2 for Kensai personalities)
- *  - Followers → unlimited
- *  - Other items → unlimited
+ *  - Spells       → Shugenja only
+ *  - Armor        → max 1 per personality
+ *  - Weapons      → max 1 (2 for Kensai, but never if either is Two-Handed)
+ *  - Two-Handed   → requires no existing Weapons; Kensai still limited to 1
+ *  - Followers    → unlimited
+ *  - Other items  → unlimited
  */
 export function canAttachTo(att: NormalizedCard, personality: CardInstance): boolean {
   const pKws = personality.card.keywords.map(k => k.toLowerCase());
@@ -153,19 +155,50 @@ export function canAttachTo(att: NormalizedCard, personality: CardInstance): boo
   }
 
   if (att.type === 'item') {
-    const isWeapon = att.keywords.some(k => k.toLowerCase().includes('weapon'));
-    if (isWeapon) {
-      const isKensai    = pKws.some(k => k.includes('kensai'));
-      const weaponCount = personality.attachments.filter(a =>
-        a.card.type === 'item' &&
-        a.card.keywords.some(k => k.toLowerCase().includes('weapon')),
-      ).length;
-      return weaponCount < (isKensai ? 2 : 1);
+    const attKws = att.keywords.map(k => k.toLowerCase());
+    const isWeapon    = attKws.some(k => k.includes('weapon'));
+    const isArmor     = attKws.some(k => k === 'armor');
+    const isTwoHanded = attKws.some(k => k === 'two-handed');
+
+    if (isArmor) {
+      const hasArmor = personality.attachments.some(
+        a => a.card.type === 'item' && a.card.keywords.some(k => k.toLowerCase() === 'armor'),
+      );
+      return !hasArmor;
     }
+
+    if (isWeapon) {
+      const isKensai = pKws.some(k => k.includes('kensai'));
+      const existingWeapons = personality.attachments.filter(
+        a => a.card.type === 'item' && a.card.keywords.some(k => k.toLowerCase().includes('weapon')),
+      );
+      const hasTwoHandedEquipped = existingWeapons.some(
+        a => a.card.keywords.some(k => k.toLowerCase() === 'two-handed'),
+      );
+
+      // Two-Handed weapons cannot be combined with any other weapon, even for Kensai
+      if (isTwoHanded) return existingWeapons.length === 0;
+      // Can't equip alongside an existing Two-Handed weapon
+      if (hasTwoHandedEquipped) return false;
+      // Kensai may carry two non-Two-Handed weapons; others are limited to one
+      return existingWeapons.length < (isKensai ? 2 : 1);
+    }
+
     return true;
   }
 
   return true; // followers: no limit
+}
+
+/**
+ * Returns true when a card has at least one ability marked as Repeatable.
+ * Repeatable abilities ignore the once-per-turn `abilitiesUsed` throttle.
+ *
+ * Pattern: "Repeatable Open:", "Repeatable Limited:", "Kharmic Repeatable …"
+ */
+export function hasRepeatableAbility(card: NormalizedCard): boolean {
+  if (!card.text) return false;
+  return /\bRepeatable\b/i.test(card.text);
 }
 
 /**
@@ -305,6 +338,9 @@ export function calcUnitForce(personality: CardInstance, forResolution: boolean)
   // Tactician bonus — always added (even when bowed the unit contributes 0 anyway)
   force += personality.tempForceBonus;
 
+  // Token force bonuses (from card effects like "+2F" tokens)
+  force += personality.tokens.reduce((s, t) => s + (t.force ?? 0), 0);
+
   return Math.max(0, force);
 }
 
@@ -329,6 +365,7 @@ export function createInstance(card: NormalizedCard, location: ZoneId, faceUp = 
     faceUp,
     location,
     attachments: [],
+    tokens: [],
     fateTokens: 0,
     honorTokens: 0,
     tempForceBonus: 0,
@@ -366,7 +403,8 @@ export function expandDeck(
  * Chi Death fires when effective Chi ≤ 0.
  */
 export function calcEffectiveChi(p: CardInstance): number {
-  const baseChi = Number(p.card.chi) || 0;
+  const baseChi   = Number(p.card.chi) || 0;
   const itemBonus = p.attachments.reduce((sum, a) => sum + (Number(a.card.chi) || 0), 0);
-  return baseChi + itemBonus;
+  const tokenBonus = p.tokens.reduce((s, t) => s + (t.chi ?? 0), 0);
+  return baseChi + itemBonus + tokenBonus;
 }

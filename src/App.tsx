@@ -321,6 +321,24 @@ function applyRelayedAction(action: import('../server/src/types').SerializedActi
       case 'play-discipline':
         store.playDiscipline(action.fateDiscardInstanceId, action.attachTargetId, 'opponent');
         break;
+      case 'add-token':
+        store.addToken(action.instanceId, action.token, 'opponent');
+        break;
+      case 'remove-token':
+        store.removeToken(action.instanceId, action.tokenId, 'opponent');
+        break;
+      case 'transfer-token':
+        store.transferToken(action.fromInstanceId, action.toInstanceId, action.tokenId, 'opponent');
+        break;
+      case 'destroy-card':
+        store.destroyCard(action.instanceId, 'opponent');
+        break;
+      case 'discard-from-play':
+        store.discardFromPlay(action.instanceId, 'opponent');
+        break;
+      case 'remove-from-game':
+        store.removeFromGame(action.instanceId, 'opponent');
+        break;
       default:
         // For unrecognized actions, do nothing — manual resolution handles complex effects
         break;

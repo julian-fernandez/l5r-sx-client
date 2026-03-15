@@ -169,5 +169,11 @@ export type SerializedAction =
   | { type: 'use-favor-battle'; targetPersonalityId: string }
   | { type: 'tactical-advantage'; personalityId: string; handCardInstanceId: string }
   | { type: 'play-discipline'; fateDiscardInstanceId: string; attachTargetId?: string }
+  | { type: 'add-token'; instanceId: string; token: { id: string; label: string; force?: number; chi?: number; keywords?: string[] } }
+  | { type: 'remove-token'; instanceId: string; tokenId: string }
+  | { type: 'transfer-token'; fromInstanceId: string; toInstanceId: string; tokenId: string }
+  | { type: 'destroy-card'; instanceId: string }
+  | { type: 'discard-from-play'; instanceId: string }
+  | { type: 'remove-from-game'; instanceId: string }
   | { type: 'sync-state' } // client asks server to snapshot their state
   ;

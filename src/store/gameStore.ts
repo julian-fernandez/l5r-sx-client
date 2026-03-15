@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import type { BattleAssignment, CardInstance, LogCategory, LogEntry, NormalizedCard, ParsedDeck, PlayerState, Province, ZoneId } from '../types/cards';
-import { calcUnitForce, calcFollowerForce, createInstance, expandDeck, shuffle, isConquerorUnit, calcEffectiveChi } from '../engine/gameActions';
+import { calcUnitForce, calcFollowerForce, createInstance, expandDeck, shuffle, isConquerorUnit, calcEffectiveChi, hasRepeatableAbility } from '../engine/gameActions';
 import type { BattleKeywordType } from '../engine/gameActions';
 import { parseDeck } from '../engine/deckParser';
 import { applyMidGameState, UNICORN_TEST_DECK, PHOENIX_TEST_DECK } from '../engine/testFixtures';
@@ -349,6 +349,43 @@ interface GameStore {
    */
   dishonorPersonality: (instanceId: string, target: 'player' | 'opponent') => void;
 
+  // ── Token system ─────────────────────────────────────────────────────────────
+  /**
+   * Place a discrete token on a card in play.
+   * Searches personalitiesHome; the token is included in Force/Chi calculations.
+   */
+  addToken: (instanceId: string, token: Omit<import('../types/cards').GameToken, 'id'>, target?: 'player' | 'opponent') => void;
+  /**
+   * Remove a single token from a card in play by its token id.
+   */
+  removeToken: (instanceId: string, tokenId: string, target?: 'player' | 'opponent') => void;
+  /**
+   * Move a token from one card to another (e.g. "pass this token to the next Personality").
+   * Both cards must be in the same player's personalitiesHome.
+   */
+  transferToken: (fromInstanceId: string, toInstanceId: string, tokenId: string, target?: 'player' | 'opponent') => void;
+
+  // ── Removal from play ────────────────────────────────────────────────────────
+  /**
+   * Destroy a card that is currently in play.
+   * - Personality: routed to honorablyDead or dishonorablelyDead based on dishonored state;
+   *   controller loses Family Honor if dishonored; attachments go to fateDiscard.
+   * - Holding / Special: routed to dynastyDiscard.
+   */
+  destroyCard: (instanceId: string, target?: 'player' | 'opponent') => void;
+  /**
+   * Discard a card from play WITHOUT it being "killed in battle."
+   * - Personality: goes to dynastyDiscard (not the Dead piles); no honor loss.
+   * - Holding / Special: goes to dynastyDiscard.
+   * - Attachment: goes to fateDiscard.
+   */
+  discardFromPlay: (instanceId: string, target?: 'player' | 'opponent') => void;
+  /**
+   * Remove a card from play entirely — it ceases to exist in any zone.
+   * Used by Discipline and "remove from game" card effects.
+   */
+  removeFromGame: (instanceId: string, target?: 'player' | 'opponent') => void;
+
   // ── Multiplayer ─────────────────────────────────────────────────────────────
   /** Enter lobby phase (shows MultiplayerLobby component). */
   enterLobby: () => void;
@@ -397,6 +434,7 @@ function emptyPlayer(): PlayerState {
     oncePerGameAbilitiesUsed: [],
     honorablyDead: [],
     dishonorablelyDead: [],
+    removed: [],
     lobbyBonus: 0,
     lobbyUsed: false,
   };
@@ -473,6 +511,7 @@ function buildPlayerState(
       oncePerGameAbilitiesUsed: [],
       honorablyDead: [],
       dishonorablelyDead: [],
+      removed: [],
       lobbyBonus: 0,
       lobbyUsed: false,
     };
@@ -829,7 +868,8 @@ export const useGameStore = create<GameStore>((set, get) => {
     const recruited: CardInstance = {
       ...inst,
       location: isHolding ? 'holdingsInPlay' : 'personalitiesHome',
-      bowed: isHolding,
+      // Fortifications enter unbowed (they defend immediately from a province)
+      bowed: isHolding && !isFortification,
       ...(isFortification ? { fortificationProvince: provinceIndex } : {}),
     };
 
@@ -1263,12 +1303,15 @@ export const useGameStore = create<GameStore>((set, get) => {
   },
 
   useHoldingAbility: (instanceId, target) => {
-    const ps = get()[target];
-    if (ps.abilitiesUsed.includes(instanceId)) return;
+    const ps   = get()[target];
     const card = ps.holdingsInPlay.find(c => c.instanceId === instanceId);
+    const repeatable = card ? hasRepeatableAbility(card.card) : false;
+    if (!repeatable && ps.abilitiesUsed.includes(instanceId)) return;
     const who = target === 'player' ? 'You' : 'Opponent';
     pushLog(`${who} activated ${card?.card.name ?? 'holding'} ability`, 'other', target);
-    set({ [target]: { ...ps, abilitiesUsed: [...ps.abilitiesUsed, instanceId] } });
+    if (!repeatable) {
+      set({ [target]: { ...ps, abilitiesUsed: [...ps.abilitiesUsed, instanceId] } });
+    }
   },
 
   useKharmic: (source, instanceId, target, provinceIndex) => {
@@ -2130,10 +2173,11 @@ export const useGameStore = create<GameStore>((set, get) => {
       ? { ...nextCard, location: `province${provinceIndex}` as ZoneId, faceUp: false, bowed: false }
       : null;
 
+    const isFortification = isHolding && inst.card.keywords.some(k => k.toLowerCase() === 'fortification');
     const recruited: CardInstance = {
       ...inst,
       location: isHolding ? 'holdingsInPlay' as ZoneId : 'personalitiesHome' as ZoneId,
-      bowed: isHolding,
+      bowed: isHolding && !isFortification,
     };
 
     const srcName = player.personalitiesHome.find(p => p.instanceId === sourcePersonalityId)?.card.name ?? 'personality';
@@ -2240,6 +2284,188 @@ export const useGameStore = create<GameStore>((set, get) => {
         ),
       },
     });
+  },
+
+  // ── Token system ─────────────────────────────────────────────────────────────
+
+  addToken: (instanceId, token, target = 'player') => {
+    const ps = get()[target];
+    const newToken = { ...token, id: `tok_${Date.now()}_${Math.random().toString(36).slice(2, 7)}` };
+    const update = (p: CardInstance) =>
+      p.instanceId === instanceId ? { ...p, tokens: [...p.tokens, newToken] } : p;
+    if (target === 'player') relay({ type: 'add-token', instanceId, token: newToken });
+    set({
+      [target]: {
+        ...ps,
+        personalitiesHome: ps.personalitiesHome.map(update),
+      },
+    });
+  },
+
+  removeToken: (instanceId, tokenId, target = 'player') => {
+    const ps = get()[target];
+    const update = (p: CardInstance) =>
+      p.instanceId === instanceId ? { ...p, tokens: p.tokens.filter(t => t.id !== tokenId) } : p;
+    if (target === 'player') relay({ type: 'remove-token', instanceId, tokenId });
+    set({
+      [target]: {
+        ...ps,
+        personalitiesHome: ps.personalitiesHome.map(update),
+      },
+    });
+  },
+
+  transferToken: (fromInstanceId, toInstanceId, tokenId, target = 'player') => {
+    const ps = get()[target];
+    let movedToken: import('../types/cards').GameToken | undefined;
+    const removeFrom = (p: CardInstance) => {
+      if (p.instanceId !== fromInstanceId) return p;
+      movedToken = p.tokens.find(t => t.id === tokenId);
+      return { ...p, tokens: p.tokens.filter(t => t.id !== tokenId) };
+    };
+    const addTo = (p: CardInstance) =>
+      p.instanceId === toInstanceId && movedToken
+        ? { ...p, tokens: [...p.tokens, movedToken] }
+        : p;
+
+    const afterRemove = ps.personalitiesHome.map(removeFrom);
+    const afterAdd    = afterRemove.map(addTo);
+    if (target === 'player') relay({ type: 'transfer-token', fromInstanceId, toInstanceId, tokenId });
+    set({ [target]: { ...ps, personalitiesHome: afterAdd } });
+  },
+
+  // ── Removal from play ────────────────────────────────────────────────────────
+
+  destroyCard: (instanceId, target = 'player') => {
+    const ps = get()[target];
+    const who = target === 'player' ? 'Your' : "Opponent's";
+
+    // Search personalitiesHome
+    const personality = ps.personalitiesHome.find(p => p.instanceId === instanceId);
+    if (personality) {
+      const isDishonored = personality.dishonored;
+      const phLoss = isDishonored ? Math.max(0, Number(personality.card.personalHonor) || 0) : 0;
+      const deadPile: 'honorablyDead' | 'dishonorablelyDead' = isDishonored ? 'dishonorablelyDead' : 'honorablyDead';
+      const attachFateDiscard: CardInstance[] = personality.attachments
+        .filter(a => ['item', 'follower', 'spell'].includes(a.card.type))
+        .map(a => ({ ...a, location: 'fateDiscard' as import('../types/cards').ZoneId }));
+
+      pushLog(`${who} ${personality.card.name} is destroyed (→ ${isDishonored ? 'Dishonorably' : 'Honorably'} Dead)`, 'battle', target);
+      if (target === 'player') relay({ type: 'destroy-card', instanceId });
+      set({
+        [target]: {
+          ...ps,
+          familyHonor: ps.familyHonor - phLoss,
+          personalitiesHome: ps.personalitiesHome.filter(p => p.instanceId !== instanceId),
+          [deadPile]: [...ps[deadPile], { ...personality, location: deadPile as import('../types/cards').ZoneId }],
+          fateDiscard: [...ps.fateDiscard, ...attachFateDiscard],
+        },
+      });
+      return;
+    }
+
+    // Search holdingsInPlay
+    const holding = ps.holdingsInPlay.find(h => h.instanceId === instanceId);
+    if (holding) {
+      pushLog(`${who} ${holding.card.name} is destroyed`, 'battle', target);
+      if (target === 'player') relay({ type: 'destroy-card', instanceId });
+      set({
+        [target]: {
+          ...ps,
+          holdingsInPlay: ps.holdingsInPlay.filter(h => h.instanceId !== instanceId),
+          dynastyDiscard: [...ps.dynastyDiscard, { ...holding, location: 'dynastyDiscard' as import('../types/cards').ZoneId }],
+        },
+      });
+      return;
+    }
+
+    // Search specialsInPlay
+    const special = ps.specialsInPlay.find(s => s.instanceId === instanceId);
+    if (special) {
+      pushLog(`${who} ${special.card.name} is destroyed`, 'battle', target);
+      if (target === 'player') relay({ type: 'destroy-card', instanceId });
+      set({
+        [target]: {
+          ...ps,
+          specialsInPlay: ps.specialsInPlay.filter(s => s.instanceId !== instanceId),
+          dynastyDiscard: [...ps.dynastyDiscard, { ...special, location: 'dynastyDiscard' as import('../types/cards').ZoneId }],
+        },
+      });
+    }
+  },
+
+  discardFromPlay: (instanceId, target = 'player') => {
+    const ps = get()[target];
+    const who = target === 'player' ? 'Your' : "Opponent's";
+
+    const personality = ps.personalitiesHome.find(p => p.instanceId === instanceId);
+    if (personality) {
+      const attachFateDiscard: CardInstance[] = personality.attachments
+        .filter(a => ['item', 'follower', 'spell'].includes(a.card.type))
+        .map(a => ({ ...a, location: 'fateDiscard' as import('../types/cards').ZoneId }));
+      pushLog(`${who} ${personality.card.name} discarded from play`, 'discard', target);
+      if (target === 'player') relay({ type: 'discard-from-play', instanceId });
+      set({
+        [target]: {
+          ...ps,
+          personalitiesHome: ps.personalitiesHome.filter(p => p.instanceId !== instanceId),
+          dynastyDiscard: [...ps.dynastyDiscard, { ...personality, location: 'dynastyDiscard' as import('../types/cards').ZoneId }],
+          fateDiscard: [...ps.fateDiscard, ...attachFateDiscard],
+        },
+      });
+      return;
+    }
+
+    const holding = ps.holdingsInPlay.find(h => h.instanceId === instanceId);
+    if (holding) {
+      pushLog(`${who} ${holding.card.name} discarded from play`, 'discard', target);
+      if (target === 'player') relay({ type: 'discard-from-play', instanceId });
+      set({
+        [target]: {
+          ...ps,
+          holdingsInPlay: ps.holdingsInPlay.filter(h => h.instanceId !== instanceId),
+          dynastyDiscard: [...ps.dynastyDiscard, { ...holding, location: 'dynastyDiscard' as import('../types/cards').ZoneId }],
+        },
+      });
+      return;
+    }
+
+    const special = ps.specialsInPlay.find(s => s.instanceId === instanceId);
+    if (special) {
+      pushLog(`${who} ${special.card.name} discarded from play`, 'discard', target);
+      if (target === 'player') relay({ type: 'discard-from-play', instanceId });
+      set({
+        [target]: {
+          ...ps,
+          specialsInPlay: ps.specialsInPlay.filter(s => s.instanceId !== instanceId),
+          dynastyDiscard: [...ps.dynastyDiscard, { ...special, location: 'dynastyDiscard' as import('../types/cards').ZoneId }],
+        },
+      });
+    }
+  },
+
+  removeFromGame: (instanceId, target = 'player') => {
+    const ps = get()[target];
+    const who = target === 'player' ? 'Your' : "Opponent's";
+
+    const allZones: (keyof PlayerState)[] = ['personalitiesHome', 'holdingsInPlay', 'specialsInPlay'];
+    for (const zone of allZones) {
+      const arr = ps[zone] as CardInstance[];
+      const card = arr.find(c => c.instanceId === instanceId);
+      if (card) {
+        pushLog(`${who} ${card.card.name} removed from game`, 'discard', target);
+        if (target === 'player') relay({ type: 'remove-from-game', instanceId });
+        const attachRemoved = card.attachments.map(a => ({ ...a, location: 'removed' as import('../types/cards').ZoneId }));
+        set({
+          [target]: {
+            ...ps,
+            [zone]: arr.filter(c => c.instanceId !== instanceId),
+            removed: [...ps.removed, { ...card, location: 'removed' as import('../types/cards').ZoneId }, ...attachRemoved],
+          },
+        });
+        return;
+      }
+    }
   },
 
   // ── Multiplayer ─────────────────────────────────────────────────────────────
