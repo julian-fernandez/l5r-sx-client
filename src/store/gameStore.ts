@@ -439,6 +439,61 @@ interface GameStore {
    */
   removeFromGame: (instanceId: string, target?: 'player' | 'opponent') => void;
 
+  // ── Effect library — common game actions ─────────────────────────────────────
+  /**
+   * Draw `count` cards from the target's Fate deck into their hand.
+   * Stops early if the deck is empty.  Distinct from drawFateCard (single draw).
+   */
+  drawFateCards: (count: number, target: 'player' | 'opponent') => void;
+  /**
+   * Explicitly unbow a specific in-play card (personality, holding, attachment).
+   * Unlike bowCard (which toggles), this always results in bowed: false.
+   * Used by card effects that read "unbow target personality."
+   */
+  unbowCard: (instanceId: string, target: 'player' | 'opponent') => void;
+  /**
+   * Add `amount` to a personality's temporary Force modifier.
+   * Positive values are bonuses; negative values are penalties.
+   * The modifier is cleared at the end of the Attack Phase / Straighten Phase.
+   * All sources (Tactician, card effects, Reactions) stack on `tempForceBonus`.
+   */
+  giveForceBonus: (instanceId: string, amount: number, target?: 'player' | 'opponent') => void;
+  /**
+   * Move a personality from battle assignment (attacker or defender) back home.
+   * Removes the personality from whichever of battleAssignments / defenderAssignments
+   * it currently appears in; the personality remains in personalitiesHome.
+   * Covers both "send home" effects and cards that move defenders mid-battle.
+   */
+  moveHome: (instanceId: string, target?: 'player' | 'opponent') => void;
+  /**
+   * Grant a temporary keyword to an in-play card for the rest of the turn.
+   * The keyword is appended to `tempKeywords` on the CardInstance; `hasEffectiveKeyword`
+   * checks both printed and temp keywords automatically.
+   * Cleared every Straighten Phase.
+   */
+  giveKeyword: (instanceId: string, keyword: string, target?: 'player' | 'opponent') => void;
+  /**
+   * Remove a keyword from an in-play card.
+   * First tries to remove from tempKeywords (temporary grants); if not found there,
+   * removes from the card's permanent keyword list for the rest of the game.
+   * Used by effects like "loses the [keyword] keyword."
+   */
+  removeKeyword: (instanceId: string, keyword: string, target?: 'player' | 'opponent') => void;
+  /**
+   * Bring a card directly into play without paying its cost.
+   * Searches hand → fateDiscard → dynastyDiscard → removed for the instanceId.
+   * - Personality → personalitiesHome (unbowed, face-up, Destined/Fortification effects applied).
+   * - Holding / Special → holdingsInPlay (bowed).
+   * - Attachment → must also supply attachTargetId to equip.
+   * Does NOT trigger Province mechanics (use recruitFromProvince for that).
+   */
+  bringIntoPlay: (instanceId: string, target?: 'player' | 'opponent', attachTargetId?: string) => void;
+  /**
+   * Remove the dishonored status from a personality, making them honorable again.
+   * Distinct from dishonorPersonality (which toggles); this always sets dishonored: false.
+   */
+  rehonorPersonality: (instanceId: string, target?: 'player' | 'opponent') => void;
+
   // ── Multiplayer ─────────────────────────────────────────────────────────────
   /** Enter lobby phase (shows MultiplayerLobby component). */
   enterLobby: () => void;
@@ -1131,7 +1186,7 @@ export const useGameStore = create<GameStore>((set, get) => {
           if (isBH && newTurnNumber === 2) return c; // stays bowed — first turn for this player
           return { ...c, bowed: false };
         }),
-        personalitiesHome:  incoming.personalitiesHome.map(c => ({ ...c, bowed: false, tempForceBonus: 0 })),
+        personalitiesHome:  incoming.personalitiesHome.map(c => ({ ...c, bowed: false, tempForceBonus: 0, tempKeywords: [] })),
         specialsInPlay:     incoming.specialsInPlay.map(c => ({ ...c, bowed: false })),
         proclaimUsed: false,
         goldPool: 0,
@@ -2040,9 +2095,9 @@ export const useGameStore = create<GameStore>((set, get) => {
     // Conqueror units don't bow on return home; also clear all tempForceBonus on both sides
     const newPersonalitiesHome = player.personalitiesHome.map(p => {
       const bowed = assignedIds.includes(p.instanceId) && !isConquerorUnit(p) ? true : p.bowed;
-      return { ...p, bowed, tempForceBonus: 0 };
+      return { ...p, bowed, tempForceBonus: 0, tempKeywords: [] };
     });
-    const newOpponentHome = opponent.personalitiesHome.map(p => ({ ...p, tempForceBonus: 0 }));
+    const newOpponentHome = opponent.personalitiesHome.map(p => ({ ...p, tempForceBonus: 0, tempKeywords: [] }));
     pushLog('Attack Phase ended — unresolved attackers return home', 'phase', 'system');
     relay({ type: 'end-attack-phase' });
     set({
@@ -2654,6 +2709,270 @@ export const useGameStore = create<GameStore>((set, get) => {
         return;
       }
     }
+  },
+
+  // ── Effect library ────────────────────────────────────────────────────────────
+
+  drawFateCards: (count, target) => {
+    let ps = get()[target];
+    let drawn = 0;
+    const newHand = [...ps.hand];
+    let deck = [...ps.fateDeck];
+    const who = target === 'player' ? 'You' : 'Opponent';
+    while (drawn < count && deck.length > 0) {
+      const [top, ...rest] = deck;
+      deck = rest;
+      newHand.push({ ...top, location: 'hand', faceUp: target !== 'opponent' });
+      pushLog(`${who} drew ${target === 'player' ? top.card.name : 'a card'}`, 'draw', target);
+      drawn++;
+    }
+    if (drawn === 0) return;
+    if (target === 'player') relay({ type: 'draw-fate-cards', count: drawn });
+    set({ [target]: { ...ps, fateDeck: deck, hand: newHand } });
+  },
+
+  unbowCard: (instanceId, target) => {
+    const ps = get()[target];
+    const unbowIn = (arr: CardInstance[]): CardInstance[] | null => {
+      let found = false;
+      const result = arr.map(inst => {
+        if (inst.instanceId !== instanceId) return inst;
+        found = true;
+        return { ...inst, bowed: false };
+      });
+      return found ? result : null;
+    };
+    for (const zone of ['holdingsInPlay', 'personalitiesHome', 'specialsInPlay'] as const) {
+      const hit = unbowIn(ps[zone] as CardInstance[]);
+      if (hit) {
+        if (target === 'player') relay({ type: 'unbow-card', instanceId });
+        const card = (ps[zone] as CardInstance[]).find(c => c.instanceId === instanceId);
+        if (card) pushLog(`${target === 'player' ? 'Your' : "Opponent's"} ${card.card.name} unbowed`, 'other', target);
+        set({ [target]: { ...ps, [zone]: hit } });
+        return;
+      }
+    }
+  },
+
+  giveForceBonus: (instanceId, amount, target = 'player') => {
+    const ps = get()[target];
+    const update = (arr: CardInstance[]): { result: CardInstance[]; name: string } | null => {
+      let name = '';
+      let found = false;
+      const result = arr.map(inst => {
+        if (inst.instanceId !== instanceId) return inst;
+        found = true;
+        name = inst.card.name;
+        return { ...inst, tempForceBonus: inst.tempForceBonus + amount };
+      });
+      return found ? { result, name } : null;
+    };
+    const hit = update(ps.personalitiesHome);
+    if (hit) {
+      const sign = amount >= 0 ? '+' : '';
+      pushLog(
+        `${target === 'player' ? 'Your' : "Opponent's"} ${hit.name} gets ${sign}${amount}F`,
+        'battle',
+        target,
+      );
+      if (target === 'player') relay({ type: 'give-force-bonus', instanceId, amount });
+      set({ [target]: { ...ps, personalitiesHome: hit.result } });
+    }
+  },
+
+  moveHome: (instanceId, target = 'player') => {
+    const { battleAssignments, defenderAssignments } = get();
+    const ps = get()[target];
+    const newBA = battleAssignments.filter(a => a.instanceId !== instanceId);
+    const newDA = defenderAssignments.filter(a => a.instanceId !== instanceId);
+    const card = ps.personalitiesHome.find(p => p.instanceId === instanceId);
+    if (card) {
+      pushLog(
+        `${target === 'player' ? 'Your' : "Opponent's"} ${card.card.name} sent home`,
+        'battle',
+        target,
+      );
+    }
+    if (target === 'player') relay({ type: 'move-home', instanceId });
+    set({ battleAssignments: newBA, defenderAssignments: newDA });
+  },
+
+  giveKeyword: (instanceId, keyword, target = 'player') => {
+    const ps = get()[target];
+    const updateIn = (arr: CardInstance[]): { result: CardInstance[]; name: string } | null => {
+      let name = '';
+      let found = false;
+      const result = arr.map(inst => {
+        if (inst.instanceId !== instanceId) return inst;
+        // Also check attachments
+        const newAttachments = inst.attachments.map(a => {
+          if (a.instanceId !== instanceId) return a;
+          found = true;
+          name = a.card.name;
+          return { ...a, tempKeywords: [...(a.tempKeywords ?? []), keyword] };
+        });
+        if (!found && inst.instanceId === instanceId) {
+          found = true;
+          name = inst.card.name;
+          return { ...inst, tempKeywords: [...(inst.tempKeywords ?? []), keyword], attachments: newAttachments };
+        }
+        return { ...inst, attachments: newAttachments };
+      });
+      return found ? { result, name } : null;
+    };
+    for (const zone of ['personalitiesHome', 'holdingsInPlay', 'specialsInPlay'] as const) {
+      const hit = updateIn(ps[zone] as CardInstance[]);
+      if (hit) {
+        pushLog(
+          `${target === 'player' ? 'Your' : "Opponent's"} ${hit.name} gains ${keyword}`,
+          'other',
+          target,
+        );
+        if (target === 'player') relay({ type: 'give-keyword', instanceId, keyword });
+        set({ [target]: { ...ps, [zone]: hit.result } });
+        return;
+      }
+    }
+  },
+
+  removeKeyword: (instanceId, keyword, target = 'player') => {
+    const ps = get()[target];
+    const kw = keyword.toLowerCase();
+    const updateIn = (arr: CardInstance[]): { result: CardInstance[]; name: string } | null => {
+      let name = '';
+      let found = false;
+      const result = arr.map(inst => {
+        if (inst.instanceId !== instanceId) return inst;
+        found = true;
+        name = inst.card.name;
+        // Remove from tempKeywords first; if not there, strip from permanent list
+        const hadTemp = (inst.tempKeywords ?? []).some(k => k.toLowerCase() === kw);
+        return {
+          ...inst,
+          tempKeywords: (inst.tempKeywords ?? []).filter(k => k.toLowerCase() !== kw),
+          card: hadTemp
+            ? inst.card
+            : { ...inst.card, keywords: inst.card.keywords.filter(k => k.toLowerCase() !== kw) },
+        };
+      });
+      return found ? { result, name } : null;
+    };
+    for (const zone of ['personalitiesHome', 'holdingsInPlay', 'specialsInPlay'] as const) {
+      const hit = updateIn(ps[zone] as CardInstance[]);
+      if (hit) {
+        pushLog(
+          `${target === 'player' ? 'Your' : "Opponent's"} ${hit.name} loses ${keyword}`,
+          'other',
+          target,
+        );
+        if (target === 'player') relay({ type: 'remove-keyword', instanceId, keyword });
+        set({ [target]: { ...ps, [zone]: hit.result } });
+        return;
+      }
+    }
+  },
+
+  bringIntoPlay: (instanceId, target = 'player', attachTargetId) => {
+    const ps = get()[target];
+    const who = target === 'player' ? 'Your' : "Opponent's";
+
+    // Search common source zones
+    const searchZones: (keyof PlayerState)[] = ['hand', 'fateDiscard', 'dynastyDiscard', 'removed'];
+    let card: CardInstance | undefined;
+    let sourceZoneKey: keyof PlayerState | undefined;
+
+    for (const zone of searchZones) {
+      const arr = ps[zone] as CardInstance[];
+      card = arr.find(c => c.instanceId === instanceId);
+      if (card) { sourceZoneKey = zone; break; }
+    }
+    if (!card || !sourceZoneKey) return;
+
+    const type = card.card.type?.toLowerCase() ?? '';
+    pushLog(`${who} ${card.card.name} brought into play`, 'recruit', target);
+    if (target === 'player') relay({ type: 'bring-into-play', instanceId, attachTargetId });
+
+    // Remove from source zone
+    const updatedSource = (ps[sourceZoneKey] as CardInstance[]).filter(c => c.instanceId !== instanceId);
+
+    // Build the in-play instance (location updated per zone below)
+    const inPlayCard: CardInstance = {
+      ...card,
+      bowed: type === 'holding' || type === 'special',
+      faceUp: true,
+      location: 'personalitiesHome',
+      tempKeywords: card.tempKeywords ?? [],
+    };
+
+    if (type === 'personality') {
+      // Apply Destined: draw a fate card
+      const hasDestined = card.card.keywords.some(k => k.toLowerCase() === 'destined');
+      let newFateDeck = ps.fateDeck;
+      let newFateHand = ps.hand;
+      if (hasDestined && newFateDeck.length > 0) {
+        const [top, ...rest] = newFateDeck;
+        newFateDeck = rest;
+        newFateHand = [...newFateHand, { ...top, location: 'hand', faceUp: target !== 'opponent' }];
+        pushLog(`${who} ${card.card.name} is Destined — drew a Fate card`, 'draw', target);
+      }
+      set({
+        [target]: {
+          ...ps,
+          [sourceZoneKey]: updatedSource,
+          hand: newFateHand,
+          fateDeck: newFateDeck,
+          personalitiesHome: [...ps.personalitiesHome, inPlayCard],
+        },
+      });
+    } else if (type === 'holding') {
+      // Check Fortification
+      const isFort = card.card.keywords.some(k => k.toLowerCase() === 'fortification');
+      const fortCard = isFort ? { ...inPlayCard, bowed: false } : inPlayCard;
+      set({
+        [target]: {
+          ...ps,
+          [sourceZoneKey]: updatedSource,
+          holdingsInPlay: [...ps.holdingsInPlay, fortCard],
+        },
+      });
+    } else if (type === 'item' || type === 'follower' || type === 'spell') {
+      // Attachment: equip to attachTargetId
+      if (!attachTargetId) return;
+      const updatedHome = ps.personalitiesHome.map(p => {
+        if (p.instanceId !== attachTargetId) return p;
+        return { ...p, attachments: [...p.attachments, { ...inPlayCard, location: 'personalitiesHome' }] };
+      });
+      set({
+        [target]: {
+          ...ps,
+          [sourceZoneKey]: updatedSource,
+          personalitiesHome: updatedHome,
+        },
+      });
+    } else {
+      // Special / ring / etc → specialsInPlay
+      set({
+        [target]: {
+          ...ps,
+          [sourceZoneKey]: updatedSource,
+          specialsInPlay: [...ps.specialsInPlay, inPlayCard],
+        },
+      });
+    }
+  },
+
+  rehonorPersonality: (instanceId, target = 'player') => {
+    const ps = get()[target];
+    const who = target === 'player' ? 'Your' : "Opponent's";
+    const updated = ps.personalitiesHome.map(p => {
+      if (p.instanceId !== instanceId) return p;
+      if (!p.dishonored) return p;
+      pushLog(`${who} ${p.card.name} rehonored`, 'honor', target);
+      return { ...p, dishonored: false };
+    });
+    if (updated === ps.personalitiesHome) return; // nothing changed
+    if (target === 'player') relay({ type: 'rehonor-personality', instanceId });
+    set({ [target]: { ...ps, personalitiesHome: updated } });
   },
 
   // ── Multiplayer ─────────────────────────────────────────────────────────────

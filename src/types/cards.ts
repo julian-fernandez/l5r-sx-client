@@ -125,10 +125,17 @@ export interface CardInstance {
    */
   tokens: GameToken[];
   /**
-   * Temporary Force bonus granted by Tactician this battle.
+   * Temporary Force bonus granted by Tactician or card effects this battle.
    * Added to calcUnitForce; cleared when the Attack Phase ends or a new turn begins.
+   * Use positive values for bonuses, negative for penalties.
    */
   tempForceBonus: number;
+  /**
+   * Keywords temporarily granted to this card by card effects.
+   * These stack on top of the printed keywords; cleared each Straighten Phase.
+   * Use hasEffectiveKeyword() to check both printed and temp keywords.
+   */
+  tempKeywords: string[];
   /**
    * True when the personality has been dishonored (by a card effect, manually, etc.).
    * Dishonored personalities that die become Dishonorably Dead instead of Honorably Dead,

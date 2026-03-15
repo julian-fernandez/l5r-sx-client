@@ -240,8 +240,10 @@ export function isTimingValid(
   switch (timing) {
     case 'Engage':  return turnPhase === 'attack' && battleStage === 'engage'       && battleWindowPriority === 'player';
     case 'Battle':  return turnPhase === 'attack' && battleStage === 'battleWindow' && battleWindowPriority === 'player';
-    case 'Limited': return turnPhase === 'action' && myTurn && priority === 'player';
-    case 'Open':    return turnPhase === 'action' && priority === 'player';
+    case 'Limited':  return turnPhase === 'action' && myTurn && priority === 'player';
+    case 'Open':     return turnPhase === 'action' && priority === 'player';
+    case 'Reaction': return false; // Reactions are triggered by events, not played manually
+    default:         return false;
   }
 }
 
@@ -518,6 +520,7 @@ export function createInstance(card: NormalizedCard, location: ZoneId, faceUp = 
     fateTokens: 0,
     honorTokens: 0,
     tempForceBonus: 0,
+    tempKeywords: [],
     dishonored: false,
   };
 }
@@ -608,4 +611,79 @@ export function calcProvinceStrength(
     )
     .reduce((sum, h) => sum + Math.max(0, Number(h.card.force) || 0), 0);
   return defender.provinceStrength + fortBonus;
+}
+
+// ─── Keyword query helpers ────────────────────────────────────────────────────
+
+/**
+ * Check whether a card currently has a keyword, considering both printed
+ * keywords on the card and any that have been temporarily granted via card
+ * effects (stored in `inst.tempKeywords`).
+ *
+ * Use this everywhere you previously wrote `card.keywords.some(...)` so that
+ * temporary keyword grants are automatically respected.
+ */
+export function hasEffectiveKeyword(inst: CardInstance, keyword: string): boolean {
+  const kw = keyword.toLowerCase();
+  const printed = inst.card.keywords.some(k => k.toLowerCase() === kw);
+  const temp    = inst.tempKeywords.some(k => k.toLowerCase() === kw);
+  return printed || temp;
+}
+
+// ─── Battle state queries ─────────────────────────────────────────────────────
+
+/**
+ * Return true if the personality with the given instanceId is currently
+ * assigned to attack at any province.
+ */
+export function isAssignedToBattle(
+  instanceId: string,
+  battleAssignments: Record<number, string[]>,
+): boolean {
+  return Object.values(battleAssignments).some(ids => ids.includes(instanceId));
+}
+
+/**
+ * Return true if the personality is currently "opposed" — i.e., it is
+ * attacking a province and at least one defender is also assigned there.
+ *
+ * A defending personality is opposed when it is in defenderAssignments at
+ * the same province where the attacker is assigned.
+ */
+export function isOpposed(
+  instanceId: string,
+  battleAssignments: Record<number, string[]>,
+  defenderAssignments: Record<number, string[]>,
+): boolean {
+  for (const [idx, attackerIds] of Object.entries(battleAssignments)) {
+    if (attackerIds.includes(instanceId)) {
+      const province = Number(idx);
+      return (defenderAssignments[province]?.length ?? 0) > 0;
+    }
+    if (defenderAssignments[Number(idx)]?.includes(instanceId)) {
+      return attackerIds.length > 0;
+    }
+  }
+  return false;
+}
+
+/**
+ * Return all personalities assigned to a specific province, split by role.
+ * Useful for effects that care about who is opposing whom at a given battlefield.
+ */
+export function getPersonalitiesAtProvince(
+  provinceIndex: number,
+  battleAssignments: Record<number, string[]>,
+  defenderAssignments: Record<number, string[]>,
+  player: Pick<PlayerState, 'personalitiesHome'>,
+  opponent: Pick<PlayerState, 'personalitiesHome'>,
+): { attackers: CardInstance[]; defenders: CardInstance[] } {
+  const attackerIds  = battleAssignments[provinceIndex]  ?? [];
+  const defenderIds  = defenderAssignments[provinceIndex] ?? [];
+  const allPlayer    = player.personalitiesHome;
+  const allOpponent  = opponent.personalitiesHome;
+  return {
+    attackers: allPlayer.filter(p => attackerIds.includes(p.instanceId)),
+    defenders: allOpponent.filter(p => defenderIds.includes(p.instanceId)),
+  };
 }

@@ -175,5 +175,13 @@ export type SerializedAction =
   | { type: 'destroy-card'; instanceId: string }
   | { type: 'discard-from-play'; instanceId: string }
   | { type: 'remove-from-game'; instanceId: string }
+  | { type: 'draw-fate-cards'; count: number }
+  | { type: 'unbow-card'; instanceId: string }
+  | { type: 'give-force-bonus'; instanceId: string; amount: number }
+  | { type: 'move-home'; instanceId: string }
+  | { type: 'give-keyword'; instanceId: string; keyword: string }
+  | { type: 'remove-keyword'; instanceId: string; keyword: string }
+  | { type: 'bring-into-play'; instanceId: string; attachTargetId?: string }
+  | { type: 'rehonor-personality'; instanceId: string }
   | { type: 'sync-state' } // client asks server to snapshot their state
   ;

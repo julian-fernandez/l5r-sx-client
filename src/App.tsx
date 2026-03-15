@@ -339,6 +339,30 @@ function applyRelayedAction(action: import('../server/src/types').SerializedActi
       case 'remove-from-game':
         store.removeFromGame(action.instanceId, 'opponent');
         break;
+      case 'draw-fate-cards':
+        store.drawFateCards(action.count, 'opponent');
+        break;
+      case 'unbow-card':
+        store.unbowCard(action.instanceId, 'opponent');
+        break;
+      case 'give-force-bonus':
+        store.giveForceBonus(action.instanceId, action.amount, 'opponent');
+        break;
+      case 'move-home':
+        store.moveHome(action.instanceId, 'opponent');
+        break;
+      case 'give-keyword':
+        store.giveKeyword(action.instanceId, action.keyword, 'opponent');
+        break;
+      case 'remove-keyword':
+        store.removeKeyword(action.instanceId, action.keyword, 'opponent');
+        break;
+      case 'bring-into-play':
+        store.bringIntoPlay(action.instanceId, 'opponent', action.attachTargetId);
+        break;
+      case 'rehonor-personality':
+        store.rehonorPersonality(action.instanceId, 'opponent');
+        break;
       default:
         // For unrecognized actions, do nothing — manual resolution handles complex effects
         break;
