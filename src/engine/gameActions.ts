@@ -191,6 +191,23 @@ export function isConquerorUnit(personality: CardInstance): boolean {
 }
 
 /**
+ * Returns true when the personality has the Tireless keyword.
+ * Tireless units do not bow when returning home (win or loss); they may
+ * also use Tireless-tagged abilities while bowed.
+ */
+export function isTirelessUnit(personality: CardInstance): boolean {
+  return personality.card.keywords.some(k => k.toLowerCase().trim() === 'tireless');
+}
+
+/**
+ * Returns true when the personality has the Shadowlands keyword.
+ * Shadowlands personalities are immune to the Fear keyword effect.
+ */
+export function isShadowlandsUnit(personality: CardInstance): boolean {
+  return personality.card.keywords.some(k => k.toLowerCase().trim() === 'shadowlands');
+}
+
+/**
  * Extract the numeric value from a keyword like "Fear 3" or "Melee Attack 2".
  * `kwType` should be the lowercase prefix to match (e.g. 'fear', 'melee attack').
  */
@@ -341,4 +358,15 @@ export function expandDeck(
     }
   }
   return instances;
+}
+
+/**
+ * Compute a personality's effective Chi stat.
+ * Base Chi comes from the personality card; Items in the unit can modify it.
+ * Chi Death fires when effective Chi ≤ 0.
+ */
+export function calcEffectiveChi(p: CardInstance): number {
+  const baseChi = Number(p.card.chi) || 0;
+  const itemBonus = p.attachments.reduce((sum, a) => sum + (Number(a.card.chi) || 0), 0);
+  return baseChi + itemBonus;
 }

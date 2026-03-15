@@ -89,17 +89,28 @@ export function InPlayRow({
   const bowCard               = useGameStore(s => s.bowCard);
   const assignToBattlefield   = useGameStore(s => s.assignToBattlefield);
   const unassignFromBattle    = useGameStore(s => s.unassignFromBattle);
+  const assignDefender        = useGameStore(s => s.assignDefender);
+  const unassignFromDefense   = useGameStore(s => s.unassignFromDefense);
   const battleStage           = useGameStore(s => s.battleStage);
   const battleWindowPriority  = useGameStore(s => s.battleWindowPriority);
   const dishonorPersonality   = useGameStore(s => s.dishonorPersonality);
+  const lobby                 = useGameStore(s => s.lobby);
+  const useTacticalAdvantage  = useGameStore(s => s.useTacticalAdvantage);
+  const activePlayer          = useGameStore(s => s.activePlayer);
+  const imperialFavor         = useGameStore(s => s.imperialFavor);
+  const playerState           = useGameStore(s => s.player);
+  const opponentState         = useGameStore(s => s.opponent);
 
   const [ctxMenu, setCtxMenu] = useState<{ items: ContextMenuEntry[]; x: number; y: number } | null>(null);
 
-  const isAttackPhase    = turnPhase === 'attack';
-  const isAssigning      = isAttackPhase && battleStage === 'assigning';
-  const isBattleWindow   = isAttackPhase && (battleStage === 'battleWindow' || battleStage === 'engage');
-  const isTargeting      = !!validAttachTargets && validAttachTargets.size > 0;
-  const isBattleTargeting = !!validBattleTargets && validBattleTargets.size > 0;
+  const isAttackPhase             = turnPhase === 'attack';
+  const isAssigning               = isAttackPhase && battleStage === 'assigning';
+  const isCavalryAssigning        = isAttackPhase && battleStage === 'cavalry-assigning';
+  const isDefenderAssigning       = isAttackPhase && battleStage === 'defender-assigning';
+  const isDefenderCavAssigning    = isAttackPhase && battleStage === 'defender-cavalry-assigning';
+  const isBattleWindow            = isAttackPhase && (battleStage === 'battleWindow' || battleStage === 'engage');
+  const isTargeting         = !!validAttachTargets && validAttachTargets.size > 0;
+  const isBattleTargeting   = !!validBattleTargets && validBattleTargets.size > 0;
 
   const handlePersonalityContextMenu = (inst: CardInstance, e: React.MouseEvent) => {
     e.preventDefault();
@@ -107,27 +118,145 @@ export function InPlayRow({
 
     // ── Player's side only: Assignment & keyword abilities ─────────────────
     if (!isOpponent) {
-      // Assignment mode
+      // Infantry assignment (assigning stage — non-cavalry only)
       if (isAssigning) {
-        const currentAssignment = battleAssignments.find(a => a.instanceId === inst.instanceId);
-        opponentProvinces.forEach(prov => {
-          if (prov.broken) return;
-          const isCurrentTarget = currentAssignment?.provinceIndex === prov.index;
+        const isCav = isCavalryUnit(inst);
+        if (isCav) {
           items.push({
-            label: isCurrentTarget ? `✓ Province ${prov.index + 1}` : `Attack Province ${prov.index + 1}`,
-            sublabel: `Str ${prov.strength}`,
-            onClick: () => assignToBattlefield(inst.instanceId, prov.index),
-            disabled: isCurrentTarget,
-            variant: 'primary',
+            label: '🐴 Cavalry — assign in Step 3',
+            sublabel: 'Cavalry units assign after defenders are placed',
+            onClick: () => {},
+            disabled: true,
           });
-        });
-        if (currentAssignment !== undefined) {
-          if (items.length > 0) items.push({ separator: true });
+        } else {
+          const currentAssignment = battleAssignments.find(a => a.instanceId === inst.instanceId);
+          opponentProvinces.forEach(prov => {
+            if (prov.broken) return;
+            const isCurrentTarget = currentAssignment?.provinceIndex === prov.index;
+            items.push({
+              label: isCurrentTarget ? `✓ Province ${prov.index + 1}` : `Attack Province ${prov.index + 1}`,
+              sublabel: `Str ${prov.strength}`,
+              onClick: () => assignToBattlefield(inst.instanceId, prov.index),
+              disabled: isCurrentTarget,
+              variant: 'primary',
+            });
+          });
+          if (currentAssignment !== undefined) {
+            if (items.length > 0) items.push({ separator: true });
+            items.push({
+              label: 'Retreat (remove from battle)',
+              onClick: () => unassignFromBattle(inst.instanceId),
+              variant: 'danger',
+            });
+          }
+        }
+      }
+
+      // Cavalry assignment (cavalry-assigning stage — cavalry only)
+      if (isCavalryAssigning) {
+        const isCav = isCavalryUnit(inst);
+        if (!isCav) {
           items.push({
-            label: 'Retreat (remove from battle)',
-            onClick: () => unassignFromBattle(inst.instanceId),
-            variant: 'danger',
+            label: '⚔ Infantry — already committed',
+            sublabel: 'Non-cavalry units have already been assigned',
+            onClick: () => {},
+            disabled: true,
           });
+        } else {
+          const currentAssignment = battleAssignments.find(a => a.instanceId === inst.instanceId);
+          opponentProvinces.forEach(prov => {
+            if (prov.broken) return;
+            const isCurrentTarget = currentAssignment?.provinceIndex === prov.index;
+            items.push({
+              label: isCurrentTarget ? `✓ Province ${prov.index + 1}` : `🐴 Attack Province ${prov.index + 1}`,
+              sublabel: `Str ${prov.strength}`,
+              onClick: () => assignToBattlefield(inst.instanceId, prov.index),
+              disabled: isCurrentTarget,
+              variant: 'primary',
+            });
+          });
+          if (currentAssignment !== undefined) {
+            if (items.length > 0) items.push({ separator: true });
+            items.push({
+              label: 'Retreat (remove from battle)',
+              onClick: () => unassignFromBattle(inst.instanceId),
+              variant: 'danger',
+            });
+          }
+        }
+      }
+
+      // Defender Cavalry assignment (defender-cavalry-assigning — Cavalry defenders only)
+      if (isDefenderCavAssigning) {
+        const isCav = isCavalryUnit(inst);
+        if (!isCav) {
+          items.push({
+            label: '⚔ Infantry — already committed',
+            sublabel: 'Non-cavalry defenders have already been assigned',
+            onClick: () => {},
+            disabled: true,
+          });
+        } else {
+          const attackedProvinces = [...new Set(battleAssignments.map(a => a.provinceIndex))];
+          const currentDefense = defenderAssignments.find(d => d.instanceId === inst.instanceId);
+          for (const pIdx of attackedProvinces) {
+            const isDefending = currentDefense?.provinceIndex === pIdx;
+            items.push({
+              label: isDefending ? `✓ Defending Province ${pIdx + 1}` : `🐴🛡 Defend Province ${pIdx + 1}`,
+              onClick: () => assignDefender(inst.instanceId, pIdx),
+              disabled: isDefending,
+              variant: 'primary',
+            });
+          }
+          if (currentDefense !== undefined) {
+            items.push({ separator: true });
+            items.push({
+              label: 'Retreat from defense',
+              onClick: () => unassignFromDefense(inst.instanceId),
+              variant: 'danger',
+            });
+          }
+        }
+      }
+
+      // Defender assignment (defender-assigning stage — non-Cavalry only)
+      if (isDefenderAssigning) {
+        const isCav = isCavalryUnit(inst);
+        if (isCav) {
+          items.push({
+            label: '🐴 Cavalry — assign in Step 4',
+            sublabel: 'Cavalry defenders assign after seeing attacker Cavalry',
+            onClick: () => {},
+            disabled: true,
+          });
+        } else {
+          const attackedProvinces = [...new Set(battleAssignments.map(a => a.provinceIndex))];
+          const currentDefense = defenderAssignments.find(d => d.instanceId === inst.instanceId);
+          if (attackedProvinces.length === 0) {
+            items.push({
+              label: 'No provinces under attack',
+              onClick: () => {},
+              disabled: true,
+            });
+          } else {
+            for (const pIdx of attackedProvinces) {
+              const isDefending = currentDefense?.provinceIndex === pIdx;
+              items.push({
+                label: isDefending ? `✓ Defending Province ${pIdx + 1}` : `🛡 Defend Province ${pIdx + 1}`,
+                onClick: () => assignDefender(inst.instanceId, pIdx),
+                disabled: isDefending,
+                variant: 'primary',
+              });
+            }
+            if (currentDefense !== undefined) {
+              items.push({ separator: true });
+              items.push({
+                label: 'Retreat from defense',
+                onClick: () => unassignFromDefense(inst.instanceId),
+                variant: 'danger',
+              });
+            }
+          }
         }
       }
 
@@ -150,6 +279,48 @@ export function InPlayRow({
         }
       }
 
+      // Lobby (Political Limited — Action phase, active player, personality unbowed with PH≥1)
+      if (turnPhase === 'action' && activePlayer === 'player') {
+        const ph = Math.max(0, Number(inst.card.personalHonor) || 0);
+        const canLobby = !inst.bowed && !inst.dishonored && ph >= 1 && !playerState.lobbyUsed;
+        if (canLobby) {
+          if (items.length > 0) items.push({ separator: true });
+          const myEff  = playerState.familyHonor  + playerState.lobbyBonus;
+          const oppEff = opponentState.familyHonor + opponentState.lobbyBonus;
+          const willSucceed = myEff > oppEff;
+          items.push({
+            label: 'Lobby for Imperial Favor',
+            sublabel: willSucceed
+              ? `Bow ${inst.card.name} — take the Favor (${myEff} > ${oppEff})`
+              : `Bow ${inst.card.name} — will fail (${myEff} ≤ ${oppEff})`,
+            onClick: () => lobby(inst.instanceId),
+            variant: willSucceed ? 'primary' : undefined,
+          });
+        }
+      }
+
+      // Tactical Advantage (Battle — Tacticians only, once per turn)
+      if (isBattleWindow && battleWindowPriority === 'player') {
+        const isTactician = inst.card.keywords.some(k => k.toLowerCase().trim() === 'tactician');
+        const tacKey = `${inst.instanceId}:tactical`;
+        const alreadyUsed = playerState.abilitiesUsed.includes(tacKey);
+        const hasHandCards = playerState.hand.length > 0;
+        if (isTactician) {
+          if (items.length > 0) items.push({ separator: true });
+          items.push({
+            label: 'Tactical Advantage',
+            sublabel: alreadyUsed
+              ? 'Already used this turn'
+              : hasHandCards
+              ? 'Discard a hand card → +Force equal to its Focus Value'
+              : 'No cards in hand',
+            onClick: () => !alreadyUsed && hasHandCards && onBattleKeywordTrigger?.(inst.instanceId, 'tactician', 0),
+            variant: alreadyUsed || !hasHandCards ? undefined : 'primary',
+            disabled: alreadyUsed || !hasHandCards,
+          });
+        }
+      }
+
       // Resolve manually
       if (onManualAbility) {
         if (items.length > 0) items.push({ separator: true });
@@ -159,6 +330,17 @@ export function InPlayRow({
           onClick: () => onManualAbility(inst),
         });
       }
+    }
+
+    // ── Rulebook Favor Battle (player holds Favor + personality is at battlefield as attacker/defender) ──
+    if (isOpponent && isBattleWindow && imperialFavor === 'player') {
+      if (items.length > 0) items.push({ separator: true });
+      items.push({
+        label: '★ Favor Battle — Send Home',
+        sublabel: `Discard Imperial Favor → move ${inst.card.name} home`,
+        onClick: () => useFavorBattle(inst.instanceId, 'player'),
+        variant: 'primary',
+      });
     }
 
     // ── Dishonor toggle (both sides) ──────────────────────────────────────
@@ -220,9 +402,13 @@ export function InPlayRow({
         flex={2}
         accent="border-r-blue-800/30"
         action={
-          isAssigning && !isOpponent ? (
-            <span className="text-[8px] text-red-400 font-semibold animate-pulse">
-              Right-click to assign
+          (isAssigning || isCavalryAssigning) && !isOpponent ? (
+            <span className={`text-[8px] font-semibold animate-pulse ${isCavalryAssigning ? 'text-yellow-400' : 'text-red-400'}`}>
+              {isCavalryAssigning ? '🐴 Cavalry — right-click to assign' : 'Right-click to assign'}
+            </span>
+          ) : (isDefenderAssigning || isDefenderCavAssigning) && !isOpponent ? (
+            <span className="text-[8px] text-rose-400 font-semibold animate-pulse">
+              {isDefenderCavAssigning ? '🐴🛡 Right-click Cavalry to defend' : '🛡 Right-click to defend'}
             </span>
           ) : isBattleTargeting && isOpponent ? (
             <span className="text-[8px] text-orange-400 font-semibold animate-pulse">
@@ -249,7 +435,7 @@ export function InPlayRow({
                   onBow={() => bowCard(inst.instanceId, target)}
                   assignment={assignment}
                   defenderAssignment={defenderAssignment}
-                  isAssigning={isAssigning && !isOpponent}
+                  isAssigning={(isAssigning || isCavalryAssigning || isDefenderAssigning || isDefenderCavAssigning) && !isOpponent}
                   onContextMenu={(e) => handlePersonalityContextMenu(inst, e)}
                   isDishonored={inst.dishonored}
                   bowCard={bowCard}
@@ -261,7 +447,7 @@ export function InPlayRow({
                     : isValidBattleTarget
                     ? () => onSelectBattleTarget?.(inst.instanceId)
                     : undefined}
-                  showCavalryBadge={isAssigning && !isOpponent && isCavalryUnit(inst)}
+                  showCavalryBadge={(isAssigning || isCavalryAssigning || isDefenderAssigning || isDefenderCavAssigning) && !isOpponent && isCavalryUnit(inst)}
                   isValidBattleTarget={isValidBattleTarget}
                   {...pp}
                 />

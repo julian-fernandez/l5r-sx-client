@@ -270,6 +270,18 @@ function applyRelayedAction(action: import('../server/src/types').SerializedActi
       case 'pass-battle':
         store.passBattlefieldAction(action.side === 'player' ? 'opponent' : 'player');
         break;
+      case 'commit-infantry':
+        store.beginResolution();
+        break;
+      case 'commit-defenders':
+        store.commitDefenders();
+        break;
+      case 'commit-cavalry':
+        store.commitCavalry();
+        break;
+      case 'commit-defender-cavalry':
+        store.commitDefenderCavalry();
+        break;
       case 'end-attack-phase':
         store.endAttackPhase();
         break;
@@ -290,6 +302,24 @@ function applyRelayedAction(action: import('../server/src/types').SerializedActi
           action.instanceId,
           action.target === 'player' ? 'opponent' : 'player',
         );
+        break;
+      case 'use-kharmic':
+        store.useKharmic(action.source, action.instanceId, 'opponent', action.provinceIndex);
+        break;
+      case 'lobby':
+        store.lobby(action.personalityId, 'opponent');
+        break;
+      case 'use-favor-limited':
+        store.useFavorLimited(action.discardCardInstanceId, 'opponent');
+        break;
+      case 'use-favor-battle':
+        store.useFavorBattle(action.targetPersonalityId, 'opponent');
+        break;
+      case 'tactical-advantage':
+        store.useTacticalAdvantage(action.personalityId, action.handCardInstanceId, 'opponent');
+        break;
+      case 'play-discipline':
+        store.playDiscipline(action.fateDiscardInstanceId, action.attachTargetId, 'opponent');
         break;
       default:
         // For unrecognized actions, do nothing — manual resolution handles complex effects

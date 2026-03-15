@@ -12,11 +12,14 @@
  */
 import type { CardInstance, PlayerState } from '../types/cards';
 import { useGameStore } from '../store/gameStore';
+import type { TurnPhase } from '../store/gameStore';
 
 interface Props {
   player: PlayerState;
   onClose: () => void;
   onOpenDeckBrowser: (cards: CardInstance[], title: string) => void;
+  turnPhase?: TurnPhase;
+  activePlayer?: 'player' | 'opponent';
 }
 
 interface ActionEntry {
@@ -31,13 +34,18 @@ interface ActionEntry {
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
-export function ActionsPanel({ player, onClose, onOpenDeckBrowser: _onOpenDeckBrowser }: Props) {
+export function ActionsPanel({ player, onClose, onOpenDeckBrowser: _onOpenDeckBrowser, turnPhase, activePlayer }: Props) {
   const turnNumber        = useGameStore(s => s.turnNumber);
   const cyclingActive     = useGameStore(s => s.cyclingActive);
   const startCycling      = useGameStore(s => s.startCycling);
   const borderKeepCycle   = useGameStore(s => s.borderKeepCycle);
+  const imperialFavor     = useGameStore(s => s.imperialFavor);
+  const useFavorLimited   = useGameStore(s => s.useFavorLimited);
+  const opponent          = useGameStore(s => s.opponent);
 
   const target = 'player';
+  const isActionPhase  = turnPhase === 'action';
+  const isActivePlayer = activePlayer === 'player';
 
   const actions: ActionEntry[] = [];
 
@@ -90,6 +98,47 @@ export function ActionsPanel({ player, onClose, onOpenDeckBrowser: _onOpenDeckBr
     // Double-click the card on the board to bow it and add gold to the pool.
     // Card text: "This card will not straighten before your second turn."
     // No separate ability entry here — it's just a holding you bow for gold.
+  }
+
+  // ── Lobby (Political Limited — Action phase, active player) ──────────────
+  if (isActionPhase && isActivePlayer) {
+    const myEff  = player.familyHonor  + player.lobbyBonus;
+    const oppEff = opponent.familyHonor + opponent.lobbyBonus;
+    const eligiblePersonality = player.personalitiesHome.find(p =>
+      !p.bowed && !p.dishonored && Math.max(0, Number(p.card.personalHonor) || 0) >= 1,
+    );
+    actions.push({
+      id: 'lobby',
+      label: 'Lobby for Imperial Favor',
+      source: 'Rulebook Player Ability',
+      description:
+        `Political Limited, once per turn: Bow an honorable Personality with ≥1 Personal Honor. ` +
+        `If your Family Honor (${myEff}${player.lobbyBonus ? ` incl. +${player.lobbyBonus} lobby bonus` : ''}) is higher than ` +
+        `opponent's (${oppEff}${opponent.lobbyBonus ? ` incl. ${opponent.lobbyBonus > 0 ? '+' : ''}${opponent.lobbyBonus} lobby bonus` : ''}), take the Imperial Favor. ` +
+        (eligiblePersonality ? `Right-click ${eligiblePersonality.card.name} on the board to Lobby.` : 'No eligible personality.'),
+      available: !player.lobbyUsed && !!eligiblePersonality,
+      disabledReason: player.lobbyUsed ? 'Already used this turn' : !eligiblePersonality ? 'No unbowed honorable personality' : undefined,
+      onActivate: () => {}, // triggered via right-click on personality
+    });
+  }
+
+  // ── Rulebook Favor Limited (Favor Political Limited) ─────────────────────
+  if (imperialFavor === 'player' && isActionPhase && isActivePlayer) {
+    const kharmic = player.hand.find(c => c.card.keywords.some(k => k.toLowerCase() === 'kharmic'));
+    const firstCard = player.hand[0];
+    actions.push({
+      id: 'favor-limited',
+      label: 'Rulebook Favor Limited',
+      source: 'Imperial Favor',
+      description:
+        'Favor Political Limited: Discard the Imperial Favor and a Fate card from your hand → draw a Fate card. ' +
+        (firstCard ? `Will discard: ${firstCard.card.name}.` : 'No hand cards.'),
+      available: player.hand.length > 0 && player.fateDeck.length > 0,
+      disabledReason: player.hand.length === 0 ? 'No hand cards to discard' : player.fateDeck.length === 0 ? 'Fate deck is empty' : undefined,
+      onActivate: () => {
+        if (firstCard) { useFavorLimited(firstCard.instanceId); onClose(); }
+      },
+    });
   }
 
   const available   = actions.filter(a => a.available);

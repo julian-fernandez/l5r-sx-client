@@ -97,6 +97,8 @@ export function Board({ player, opponent, activePlayer, onReset, multiplayerMode
   const defenderAssignments   = useGameStore(s => s.defenderAssignments);
   const assignDefender        = useGameStore(s => s.assignDefender);
   const battleStage           = useGameStore(s => s.battleStage);
+  const commitDefenders       = useGameStore(s => s.commitDefenders);
+  const commitDefenderCavalry = useGameStore(s => s.commitDefenderCavalry);
   const endAttackPhase        = useGameStore(s => s.endAttackPhase);
   const passBattlefieldAction = useGameStore(s => s.passBattlefieldAction);
   const battleWindowPriority  = useGameStore(s => s.battleWindowPriority);
@@ -146,34 +148,65 @@ export function Board({ player, opponent, activePlayer, onReset, multiplayerMode
     advancePhase, opponentAutoPass, passPriority, endAttackPhase, passBattlefieldAction,
   ]);
 
-  // ── Auto-defender: when player commits attackers, opponent assigns defenders ─
-  // Fires when battleStage moves to 'resolving' and no defenders are yet assigned.
+  // ── Auto-defender: when infantry committed, opponent bot assigns defenders ──
+  // Fires when battleStage moves to 'defender-assigning' (solo only).
   // In multiplayer the real opponent assigns defenders on their own client.
-  // Assignment order mirrors the CR: non-Cavalry defenders first, then Cavalry.
+  // After auto-assigning, immediately commits defenders to advance to cavalry phase.
   useEffect(() => {
     if (multiplayerMode) return;
-    if (battleStage !== 'resolving') return;
+    if (battleStage !== 'defender-assigning') return;
     if (defenderAssignments.length > 0) return; // already assigned
 
     const attackedProvinces = [...new Set(battleAssignments.map(a => a.provinceIndex))];
-    if (attackedProvinces.length === 0) return;
+    if (attackedProvinces.length === 0) {
+      // No one is attacking — skip straight through
+      const timer = window.setTimeout(() => commitDefenders(), 300);
+      return () => clearTimeout(timer);
+    }
 
-    // Sort opponent personalities: non-Cavalry first, Cavalry last
+    // Sort opponent personalities: non-Cavalry first (rule-book order), Cavalry last
     const available = [...opponent.personalitiesHome]
-      .filter(p => !p.bowed) // bowed personalities cannot defend
+      .filter(p => !p.bowed)
       .sort((a, b) => (isCavalryUnit(a) ? 1 : 0) - (isCavalryUnit(b) ? 1 : 0));
 
-    if (available.length === 0) return;
-
     const timer = window.setTimeout(() => {
-      // Assign one defender per attacked province (as many as available)
       for (let i = 0; i < attackedProvinces.length && i < available.length; i++) {
         assignDefender(available[i].instanceId, attackedProvinces[i]);
       }
+      commitDefenders();
     }, 500);
 
     return () => clearTimeout(timer);
-  }, [battleStage, defenderAssignments.length, battleAssignments, opponent.personalitiesHome, assignDefender]);
+  }, [battleStage, defenderAssignments.length, battleAssignments, opponent.personalitiesHome, assignDefender, commitDefenders, multiplayerMode]);
+
+  // ── Auto defender-cavalry: bot assigns cavalry defenders, then commits ──────
+  // Fires when battleStage moves to 'defender-cavalry-assigning' (solo only).
+  useEffect(() => {
+    if (multiplayerMode) return;
+    if (battleStage !== 'defender-cavalry-assigning') return;
+
+    const alreadyAssignedIds = new Set(defenderAssignments.map(d => d.instanceId));
+    const attackedProvinces  = [...new Set(battleAssignments.map(a => a.provinceIndex))];
+
+    const cavDefenders = opponent.personalitiesHome.filter(p =>
+      !p.bowed && !alreadyAssignedIds.has(p.instanceId) && isCavalryUnit(p)
+    );
+
+    const timer = window.setTimeout(() => {
+      // Assign one cavalry defender per undefended attacked province (if any)
+      let ci = 0;
+      for (const pIdx of attackedProvinces) {
+        const alreadyDefended = defenderAssignments.some(d => d.provinceIndex === pIdx);
+        if (!alreadyDefended && ci < cavDefenders.length) {
+          assignDefender(cavDefenders[ci].instanceId, pIdx);
+          ci++;
+        }
+      }
+      commitDefenderCavalry();
+    }, 400);
+
+    return () => clearTimeout(timer);
+  }, [battleStage, defenderAssignments, battleAssignments, opponent.personalitiesHome, assignDefender, commitDefenderCavalry, multiplayerMode]);
 
   const playFromHand        = useGameStore(s => s.playFromHand);
   const applyBattleKeyword  = useGameStore(s => s.applyBattleKeyword);
@@ -181,6 +214,9 @@ export function Board({ player, opponent, activePlayer, onReset, multiplayerMode
   const reserveRecruit      = useGameStore(s => s.reserveRecruit);
   const playRingToPermanent = useGameStore(s => s.playRingToPermanent);
   const gameResult          = useGameStore(s => s.gameResult);
+  const imperialFavor       = useGameStore(s => s.imperialFavor);
+  const useFavorLimited     = useGameStore(s => s.useFavorLimited);
+  const useFavorBattle      = useGameStore(s => s.useFavorBattle);
 
   // ── Card play handlers ───────────────────────────────────────────────────
   const handlePlayCard = useCallback((instance: CardInstance) => {
@@ -337,9 +373,44 @@ export function Board({ player, opponent, activePlayer, onReset, multiplayerMode
           </div>
 
           {/* ── Phase + priority indicator ─────────────────────── */}
-          <PhaseIndicator phase={turnPhase} priority={priority} />
+          <div className="flex items-center gap-2">
+            <PhaseIndicator phase={turnPhase} priority={priority} />
+
+            {/* Imperial Favor indicator */}
+            <ImperialFavorBadge favor={imperialFavor} />
+          </div>
 
           <div className="flex items-center gap-2">
+            {/* Rulebook Favor Limited: discard Favor + a hand card → draw a card */}
+            {imperialFavor === 'player' && turnPhase === 'action' && activePlayer === 'player' && player.hand.length > 0 && (
+              <button
+                onClick={() => {
+                  const card = player.hand[0];
+                  if (card) useFavorLimited(card.instanceId);
+                }}
+                title="Rulebook Favor Limited: Discard the Imperial Favor and a Fate card → draw a card"
+                className="text-[10px] font-bold px-2 py-0.5 rounded border border-yellow-600 bg-yellow-950/60 text-yellow-300 hover:bg-yellow-900/50 transition-colors"
+              >
+                ★ Favor Limited
+              </button>
+            )}
+
+            {/* Rulebook Favor Battle: discard Favor → move attacking enemy personality home */}
+            {imperialFavor === 'player' && (battleStage === 'engage' || battleStage === 'battleWindow') && (
+              <button
+                onClick={() => {
+                  // Open targeting mode for selecting an opponent personality to send home
+                  // For now: trigger a log message and let the player select manually
+                  // Full targeting integration is TODO
+                  alert('Select an opponent personality at the battlefield — then click "Resolve manually" on them to move them home, or use the Rulebook Favor Battle option in their context menu.');
+                }}
+                title="Rulebook Favor Battle: Discard the Imperial Favor → move a target attacking enemy Personality home"
+                className="text-[10px] font-bold px-2 py-0.5 rounded border border-yellow-600 bg-yellow-950/60 text-yellow-300 hover:bg-yellow-900/50 transition-colors"
+              >
+                ★ Favor Battle
+              </button>
+            )}
+
             {/* Pass priority — show whenever the local player has priority in the action phase.
                 In multiplayer priority can be ours even during the opponent's active turn. */}
             {turnPhase === 'action' && priority === 'player' && (
@@ -404,6 +475,8 @@ export function Board({ player, opponent, activePlayer, onReset, multiplayerMode
               playerPersonalities={player.personalitiesHome}
               opponentPersonalities={opponent.personalitiesHome}
               opponentProvinces={opponent.provinces}
+              activePlayer={activePlayer}
+              multiplayerMode={multiplayerMode}
               onEndAttackPhase={endAttackPhase}
             />
           ) : (
@@ -570,6 +643,8 @@ export function Board({ player, opponent, activePlayer, onReset, multiplayerMode
                 player={player}
                 onClose={() => setOpenPanel(null)}
                 onOpenDeckBrowser={handleOpenDeckBrowser}
+                turnPhase={turnPhase}
+                activePlayer={activePlayer}
               />
             )}
             {openPanel === 'log' && (
@@ -855,11 +930,35 @@ function clanColor(clan: string | null): string {
     case 'crab':       return 'bg-clan-crab';
     case 'crane':      return 'bg-clan-crane';
     case 'dragon':     return 'bg-clan-dragon';
-    case 'lion':       return 'bg-clan-lion';
-    case 'phoenix':    return 'bg-clan-phoenix';
-    case 'scorpion':   return 'bg-clan-scorpion';
-    case 'unicorn':    return 'bg-clan-unicorn';
-    case 'mantis':     return 'bg-clan-mantis';
-    default:           return 'bg-gray-600';
+  case 'lion':       return 'bg-clan-lion';
+  case 'phoenix':    return 'bg-clan-phoenix';
+  case 'scorpion':   return 'bg-clan-scorpion';
+  case 'unicorn':    return 'bg-clan-unicorn';
+  case 'mantis':     return 'bg-clan-mantis';
+  default:           return 'bg-gray-600';
   }
+}
+
+function ImperialFavorBadge({ favor }: { favor: 'player' | 'opponent' | null }) {
+  if (favor === null) return (
+    <span
+      title="Imperial Favor: uncontrolled — use Lobby to claim it"
+      className="text-[9px] font-bold px-1.5 py-0.5 rounded border border-gray-700 text-gray-600 bg-transparent tracking-wide select-none"
+    >
+      ★ FAVOR
+    </span>
+  );
+  return (
+    <span
+      title={favor === 'player' ? 'You hold the Imperial Favor' : 'Opponent holds the Imperial Favor'}
+      className={[
+        'text-[9px] font-bold px-1.5 py-0.5 rounded border tracking-wide select-none',
+        favor === 'player'
+          ? 'border-yellow-500 text-yellow-300 bg-yellow-950/50'
+          : 'border-orange-600 text-orange-400 bg-orange-950/40',
+      ].join(' ')}
+    >
+      ★ {favor === 'player' ? 'YOUR FAVOR' : 'OPP FAVOR'}
+    </span>
+  );
 }

@@ -122,6 +122,11 @@ export function normalizeCard(raw: CardCatalogEntry): NormalizedCard {
     base.senseiHonorMod = mods.honorMod;
   }
 
+  // Discipline trait: "Discipline [PAY X]" — card may be played from the Fate
+  // discard pile by paying its normal cost + X additional gold, then removed from game.
+  const disciplineMatch = text.match(/Discipline\s*\[PAY\s*(\d+)\]/i);
+  if (disciplineMatch) base.disciplineCost = parseInt(disciplineMatch[1]);
+
   return base;
 }
 

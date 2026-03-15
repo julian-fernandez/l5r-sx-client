@@ -80,6 +80,13 @@ export interface NormalizedCard {
   senseiProvinceMod?: number;
   /** Honor modifier (sensei only, parsed from text) */
   senseiHonorMod?: number;
+  /**
+   * Gold cost parsed from the "Discipline [PAY X]" trait in the card text.
+   * When set, the card may be played from the Fate discard pile by paying its
+   * normal cost plus this additional cost; it is then removed from the game.
+   * undefined = card has no Discipline trait.
+   */
+  disciplineCost?: number;
 }
 
 // ─── Game runtime types ───────────────────────────────────────────────────────
@@ -105,6 +112,16 @@ export interface CardInstance {
    * and their controller loses Family Honor equal to the personality's printed Personal Honor.
    */
   dishonored: boolean;
+  /**
+   * True once a Resilient card has already survived battle resolution.
+   * After the first use, the Resilient keyword no longer applies.
+   */
+  resilientUsed?: boolean;
+  /**
+   * For Fortification holdings: the province index this holding was recruited from.
+   * Its Force is added to that province's defense total in battle.
+   */
+  fortificationProvince?: number;
 }
 
 export type ZoneId =
@@ -201,6 +218,16 @@ export interface PlayerState {
    * Never reset; persists for the entire game.
    */
   oncePerGameAbilitiesUsed: string[];
+  /**
+   * Bonus added to this player's Family Honor ONLY when comparing Honor during
+   * a Lobby action. Not an actual Honor gain; doesn't affect Family Honor itself.
+   */
+  lobbyBonus: number;
+  /**
+   * Whether this player has already used their once-per-turn Lobby player ability.
+   * Reset to false at the start of each new turn (Straighten Phase).
+   */
+  lobbyUsed: boolean;
   /**
    * Personalities killed honorably in battle.
    * Distinct from the discard pile — many card effects specifically reference dead personalities.

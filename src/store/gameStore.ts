@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import type { BattleAssignment, CardInstance, LogCategory, LogEntry, NormalizedCard, ParsedDeck, PlayerState, Province, ZoneId } from '../types/cards';
-import { calcUnitForce, calcFollowerForce, createInstance, expandDeck, shuffle, isConquerorUnit } from '../engine/gameActions';
+import { calcUnitForce, calcFollowerForce, createInstance, expandDeck, shuffle, isConquerorUnit, calcEffectiveChi } from '../engine/gameActions';
 import type { BattleKeywordType } from '../engine/gameActions';
 import { parseDeck } from '../engine/deckParser';
 import { applyMidGameState, UNICORN_TEST_DECK, PHOENIX_TEST_DECK } from '../engine/testFixtures';
@@ -77,11 +77,15 @@ interface GameStore {
    * Which stage of the Attack Phase we are in.
    * null          → not in Attack Phase
    * 'assigning'   → player is assigning personalities to provinces
-   * 'resolving'   → player selects which battlefield to resolve next
-   * 'engage'      → Engage window open on currentBattlefield (Engage: abilities)
-   * 'battleWindow'→ Battle window open on currentBattlefield (Battle:/Open: abilities)
+   * 'assigning'                 → attacker assigns non-Cavalry units
+   * 'defender-assigning'        → defender assigns non-Cavalry; attacker waits
+   * 'cavalry-assigning'         → attacker assigns Cavalry after seeing defender positions
+   * 'defender-cavalry-assigning'→ defender assigns Cavalry after seeing attacker Cavalry
+   * 'resolving'                 → player selects which battlefield to resolve next
+   * 'engage'                    → Engage window open on currentBattlefield
+   * 'battleWindow'              → Battle window open on currentBattlefield
    */
-  battleStage: 'assigning' | 'resolving' | 'engage' | 'battleWindow' | null;
+  battleStage: 'assigning' | 'defender-assigning' | 'cavalry-assigning' | 'defender-cavalry-assigning' | 'resolving' | 'engage' | 'battleWindow' | null;
   /** Index of the opponent province currently being resolved (engage/battleWindow stages). */
   currentBattlefield: number | null;
   /** Who holds priority within the current engage/battleWindow pass cycle. */
@@ -104,6 +108,11 @@ interface GameStore {
    * reason: 'honor' = Honor victory (40+); 'dishonor' = Dishonor defeat (≤ −20).
    */
   gameResult: { winner: 'player' | 'opponent'; reason: 'honor' | 'dishonor' | 'enlightenment' } | null;
+  /**
+   * Who currently holds the Imperial Favor. Starts null (uncontrolled).
+   * Gained via the Lobby player ability; spent by Rulebook Favor actions.
+   */
+  imperialFavor: 'player' | 'opponent' | null;
 
   setCatalogLoaded: (loaded: boolean) => void;
   setStrongholdOverride: (o: { honor: number; gold: number; provinceStrength: number } | null) => void;
@@ -200,6 +209,58 @@ interface GameStore {
     selectedAbility?: string,
   ) => void;
 
+  /**
+   * Use the Kharmic player ability (Repeatable Limited, 2g).
+   * - source 'hand': discard a Kharmic Fate card from hand → draw a Fate card.
+   * - source 'province': discard a Kharmic Dynasty card from a province → refill that province face-up.
+   */
+  useKharmic: (
+    source: 'hand' | 'province',
+    instanceId: string,
+    target: 'player' | 'opponent',
+    provinceIndex?: number,
+  ) => void;
+
+  // ── Imperial Favor / Lobby ────────────────────────────────────────────────
+  /**
+   * Lobby player ability (Political Limited, once per turn).
+   * Preconditions: Action phase, active player's turn, Honor strictly higher than opponent's
+   * (including Lobby Bonus on each side), personality must be unbowed with PH ≥ 1.
+   * Effect: bow the personality, take the Imperial Favor.
+   */
+  lobby: (personalityId: string, target?: 'player' | 'opponent') => void;
+  /**
+   * Rulebook Favor Limited (Favor Political Limited).
+   * Cost: discard the Imperial Favor + discard one Fate card from hand.
+   * Effect: draw a Fate card.
+   */
+  useFavorLimited: (discardCardInstanceId: string, target?: 'player' | 'opponent') => void;
+  /**
+   * Rulebook Favor Battle (Favor Political Battle).
+   * Cost: discard the Imperial Favor.
+   * Effect: move a target attacking enemy Personality home.
+   * actingTarget: 'player' when own action; 'opponent' when relay (flips perspective).
+   */
+  useFavorBattle: (targetPersonalityId: string, actingTarget?: 'player' | 'opponent') => void;
+
+  // ── Tactical Advantage ────────────────────────────────────────────────────
+  /**
+   * Rulebook Tactical Advantage (Battle, once per turn per Tactician).
+   * Cost: discard a hand card.
+   * Effect: give this Tactician personality a Force bonus equal to the discarded
+   *         card's Focus Value.
+   */
+  useTacticalAdvantage: (personalityId: string, handCardInstanceId: string, target?: 'player' | 'opponent') => void;
+
+  // ── Discipline ────────────────────────────────────────────────────────────
+  /**
+   * Play a Fate card with the Discipline trait from the Fate discard pile.
+   * Cost: card's normal Gold Cost + Discipline cost (from card text).
+   * After the action resolves the card is removed from the game.
+   * For strategies: resolved as a played card; for attachments: equip to target.
+   */
+  playDiscipline: (fateDiscardInstanceId: string, attachTargetId?: string, target?: 'player' | 'opponent') => void;
+
   // ── Battle actions ────────────────────────────────────────────────────────
   /** Begin the Attack Phase — player now assigns personalities to provinces. */
   declareBattle: () => void;
@@ -223,10 +284,29 @@ interface GameStore {
   /** End the Attack Phase (all battlefields done or player retreats). */
   endAttackPhase: () => void;
   /**
-   * Assign an opponent personality as a defender for a province.
-   * Called by the auto-opponent when the stage moves to 'resolving'.
+   * Defender commits their assignments — moves stage to 'cavalry-assigning'.
+   * In solo mode, called automatically after the bot auto-assigns.
+   */
+  commitDefenders: () => void;
+  /**
+   * Attacker commits cavalry assignments — moves stage to 'defender-cavalry-assigning'.
+   * Also used to skip the cavalry phase when no cavalry are available.
+   */
+  commitCavalry: () => void;
+  /**
+   * Defender commits their cavalry assignments — moves stage to 'resolving'.
+   * In solo mode, called automatically after the bot auto-assigns cavalry defenders.
+   */
+  commitDefenderCavalry: () => void;
+  /**
+   * Assign a personality as a defender for a province.
+   * Can be called with either a player or opponent personality id:
+   *   - Solo: auto-assigns from opponent.personalitiesHome
+   *   - Multiplayer (defender): assigns from player.personalitiesHome and relays
    */
   assignDefender: (instanceId: string, provinceIndex: number) => void;
+  /** Remove a personality from defender assignments. */
+  unassignFromDefense: (instanceId: string) => void;
   /**
    * Apply a Fear / Melee Attack / Ranged Attack keyword action.
    * The follower-shield rule is enforced automatically: if the target personality
@@ -317,6 +397,8 @@ function emptyPlayer(): PlayerState {
     oncePerGameAbilitiesUsed: [],
     honorablyDead: [],
     dishonorablelyDead: [],
+    lobbyBonus: 0,
+    lobbyUsed: false,
   };
 }
 
@@ -391,6 +473,8 @@ function buildPlayerState(
       oncePerGameAbilitiesUsed: [],
       honorablyDead: [],
       dishonorablelyDead: [],
+      lobbyBonus: 0,
+      lobbyUsed: false,
     };
 }
 
@@ -504,6 +588,7 @@ export const useGameStore = create<GameStore>((set, get) => {
   strongholdOverride: null,
   gameLog: [],
   gameResult: null,
+  imperialFavor: null,
   battleAssignments: [],
   defenderAssignments: [],
   battleStage: null,
@@ -679,16 +764,51 @@ export const useGameStore = create<GameStore>((set, get) => {
 
   recruitFromProvince: (provinceIndex, target, options = {}) => {
     const { discount = false, proclaim = false } = options;
-    const ps = get()[target];
+    const state = get();
+    const ps  = state[target];
     const province = ps.provinces[provinceIndex];
     if (!province?.card || !province.faceUp) return;
     if (proclaim && ps.proclaimUsed) return; // once per turn
 
     const inst = province.card;
-    const baseCost = Math.max(0, Number(inst.card.cost) || 0);
+    const kws  = inst.card.keywords.map(k => k.toLowerCase().trim());
+    const isHolding = inst.card.type === 'holding';
+    const who = target === 'player' ? 'You' : 'Opponent';
 
-    // Clan Discount: -2g when using the discount option. Mutually exclusive with Proclaim.
-    // Proclaim: full printed cost (no discount), adds Personal Honor to Family Honor.
+    // Loyal: personality can only be recruited if the player's stronghold clan matches
+    if (!isHolding && kws.includes('loyal')) {
+      const strongholdClan = ps.stronghold?.clan?.toLowerCase() ?? '';
+      const cardClan       = inst.card.clan?.toLowerCase() ?? '';
+      if (!strongholdClan || !cardClan || strongholdClan !== cardClan) {
+        pushLog(
+          `Cannot recruit ${inst.card.name} — Loyal (requires ${inst.card.clan ?? 'matching'} clan)`,
+          'recruit', target,
+        );
+        return;
+      }
+    }
+
+    // Singular: only one copy of this card in play for this player
+    if (!isHolding && kws.includes('singular')) {
+      if (ps.personalitiesHome.some(p => p.card.id === inst.card.id)) {
+        pushLog(`Cannot recruit ${inst.card.name} — Singular card already in play`, 'recruit', target);
+        return;
+      }
+    }
+
+    // Unique: a player cannot bring into play a Unique card if they already control one with the same title
+    if (kws.includes('unique')) {
+      const title = inst.card.name.toLowerCase();
+      const alreadyControlled =
+        ps.personalitiesHome.some(p => p.card.name.toLowerCase() === title) ||
+        ps.holdingsInPlay.some(p => p.card.name.toLowerCase() === title);
+      if (alreadyControlled) {
+        pushLog(`Cannot recruit ${inst.card.name} — Unique: already control one`, 'recruit', target);
+        return;
+      }
+    }
+
+    const baseCost    = Math.max(0, Number(inst.card.cost) || 0);
     const discountAmt = discount ? 2 : 0;
     const finalCost   = Math.max(0, baseCost - discountAmt);
 
@@ -703,42 +823,36 @@ export const useGameStore = create<GameStore>((set, get) => {
     const newProvince: Province = { ...province, card: newProvinceCard, faceUp: false };
     const provinces = ps.provinces.map((p, i) => (i === provinceIndex ? newProvince : p));
 
-    // Place recruited card into the right zone; holdings always enter play bowed
-    const isHolding = inst.card.type === 'holding';
+    // Fortification: track which province this holding came from
+    const isFortification = isHolding && kws.includes('fortification');
 
-    // Singular: only one copy of this card may be in play at a time
-    if (!isHolding) {
-      const isSingular = inst.card.keywords.some(k => k.toLowerCase().trim() === 'singular');
-      if (isSingular && ps.personalitiesHome.some(p => p.card.id === inst.card.id)) {
-        pushLog(
-          `Cannot recruit ${inst.card.name} — Singular card already in play`,
-          'recruit', target,
-        );
-        return;
-      }
-    }
     const recruited: CardInstance = {
       ...inst,
       location: isHolding ? 'holdingsInPlay' : 'personalitiesHome',
       bowed: isHolding,
+      ...(isFortification ? { fortificationProvince: provinceIndex } : {}),
     };
 
     // Proclaim: gain Personal Honor equal to the personality's PH stat
     const phGain = proclaim ? Math.max(0, Number(inst.card.personalHonor) || 0) : 0;
 
-    const who = target === 'player' ? 'You' : 'Opponent';
     if (proclaim) {
-      pushLog(
-        `${who} proclaimed ${inst.card.name} for ${finalCost}g (+${phGain} honor)`,
-        'recruit', target,
-      );
+      pushLog(`${who} proclaimed ${inst.card.name} for ${finalCost}g (+${phGain} honor)`, 'recruit', target);
     } else if (discount) {
-      pushLog(
-        `${who} recruited ${inst.card.name} with clan discount for ${finalCost}g`,
-        'recruit', target,
-      );
+      pushLog(`${who} recruited ${inst.card.name} with clan discount for ${finalCost}g`, 'recruit', target);
     } else {
       pushLog(`${who} recruited ${inst.card.name} for ${finalCost}g`, 'recruit', target);
+    }
+
+    // Destined: draw a Fate card when entering play
+    const isDestined = !isHolding && kws.includes('destined');
+    let newFateDeck = ps.fateDeck;
+    let newHand = ps.hand;
+    if (isDestined && ps.fateDeck.length > 0) {
+      const [drawnCard, ...restFate] = ps.fateDeck;
+      newFateDeck = restFate;
+      newHand = [...ps.hand, { ...drawnCard, location: 'hand' as ZoneId }];
+      pushLog(`${who} draws a Fate card — ${inst.card.name} is Destined`, 'recruit', target);
     }
 
     if (target === 'player') relay({ type: 'recruit', provinceIndex, proclaim });
@@ -746,10 +860,11 @@ export const useGameStore = create<GameStore>((set, get) => {
       [target]: {
         ...ps,
         provinces,
-        dynastyDeck: restDynasty,
+        dynastyDeck:      restDynasty,
+        fateDeck:         newFateDeck,
+        hand:             newHand,
         personalitiesHome: isHolding ? ps.personalitiesHome : [...ps.personalitiesHome, recruited],
         holdingsInPlay:    isHolding ? [...ps.holdingsInPlay, recruited] : ps.holdingsInPlay,
-        // No gold change in this edition: entire pool is spent on a purchase
         goldPool:     0,
         familyHonor:  ps.familyHonor + phGain,
         proclaimUsed: proclaim ? true : ps.proclaimUsed,
@@ -925,6 +1040,7 @@ export const useGameStore = create<GameStore>((set, get) => {
         proclaimUsed: false,
         goldPool: 0,
         abilitiesUsed: [],
+        lobbyUsed: false,
       };
 
       // Per SX rules: all face-down province cards flip face-up at the start of every turn.
@@ -1032,15 +1148,24 @@ export const useGameStore = create<GameStore>((set, get) => {
         'other', target,
       );
       if (target === 'player') relay({ type: 'play-from-hand', instanceId, targetId: attachTargetId, abilityText: selectedAbility });
+
+      let newPersonalitiesHome = ps.personalitiesHome.map(p =>
+        p.instanceId !== attachTargetId
+          ? p
+          : { ...p, attachments: [...p.attachments, { ...inst, location: 'personalitiesHome' as ZoneId }] },
+      );
+      // Chi Death: if attaching this item reduces the personality's effective Chi to ≤ 0, destroy it
+      const afterAttach = newPersonalitiesHome.find(p => p.instanceId === attachTargetId);
+      if (afterAttach && calcEffectiveChi(afterAttach) <= 0) {
+        pushLog(`Chi Death: ${afterAttach.card.name}'s effective Chi reached 0 — destroyed`, 'battle', 'system');
+        newPersonalitiesHome = newPersonalitiesHome.filter(p => p.instanceId !== attachTargetId);
+      }
+
       set({
         [target]: {
           ...ps,
           hand: newHand,
-          personalitiesHome: ps.personalitiesHome.map(p =>
-            p.instanceId !== attachTargetId
-              ? p
-              : { ...p, attachments: [...p.attachments, { ...inst, location: 'personalitiesHome' as ZoneId }] },
-          ),
+          personalitiesHome: newPersonalitiesHome,
           goldPool: Math.max(0, ps.goldPool - cost),
         },
       });
@@ -1146,6 +1271,314 @@ export const useGameStore = create<GameStore>((set, get) => {
     set({ [target]: { ...ps, abilitiesUsed: [...ps.abilitiesUsed, instanceId] } });
   },
 
+  useKharmic: (source, instanceId, target, provinceIndex) => {
+    const ps  = get()[target];
+    const who = target === 'player' ? 'You' : 'Opponent';
+    const KHARMIC_COST = 2;
+
+    if (ps.goldPool < KHARMIC_COST) {
+      pushLog(`Cannot use Kharmic ability — need ${KHARMIC_COST}g, have ${ps.goldPool}g`, 'gold', target);
+      return;
+    }
+
+    if (source === 'hand') {
+      const card = ps.hand.find(c => c.instanceId === instanceId);
+      if (!card) return;
+      if (!card.card.keywords.some(k => k.toLowerCase().trim() === 'kharmic')) {
+        pushLog(`${card.card.name} does not have the Kharmic keyword`, 'other', target);
+        return;
+      }
+      if (ps.fateDeck.length === 0) {
+        pushLog('Cannot use Kharmic — Fate deck is empty', 'other', target);
+        return;
+      }
+      const [drawn, ...restFate] = ps.fateDeck;
+      if (target === 'player') relay({ type: 'use-kharmic', source: 'hand', instanceId });
+      pushLog(`${who} used Kharmic — discarded ${card.card.name}, drew a Fate card (−${KHARMIC_COST}g)`, 'other', target);
+      set({
+        [target]: {
+          ...ps,
+          goldPool:   Math.max(0, ps.goldPool - KHARMIC_COST),
+          hand:       [...ps.hand.filter(c => c.instanceId !== instanceId), { ...drawn, location: 'hand' as ZoneId }],
+          fateDeck:   restFate,
+          fateDiscard: [{ ...card, location: 'fateDiscard' as ZoneId }, ...ps.fateDiscard],
+        },
+      });
+    } else {
+      // source === 'province'
+      if (provinceIndex === undefined) return;
+      const province = ps.provinces[provinceIndex];
+      if (!province?.card || !province.faceUp) return;
+      const card = province.card;
+      if (!card.card.keywords.some(k => k.toLowerCase().trim() === 'kharmic')) {
+        pushLog(`${card.card.name} does not have the Kharmic keyword`, 'other', target);
+        return;
+      }
+      // Draw from dynasty deck to refill province face-up
+      const [nextCard = null, ...restDynasty] = ps.dynastyDeck;
+      const newProvinceCard: CardInstance | null = nextCard
+        ? { ...nextCard, location: `province${provinceIndex}` as ZoneId, faceUp: true, bowed: false }
+        : null;
+      const newProvinces = ps.provinces.map((p, i) =>
+        i === provinceIndex ? { ...p, card: newProvinceCard, faceUp: true } : p,
+      );
+      if (target === 'player') relay({ type: 'use-kharmic', source: 'province', instanceId, provinceIndex });
+      pushLog(`${who} used Kharmic — discarded ${card.card.name} from Province ${provinceIndex + 1}, refilled face-up (−${KHARMIC_COST}g)`, 'other', target);
+      set({
+        [target]: {
+          ...ps,
+          goldPool:      Math.max(0, ps.goldPool - KHARMIC_COST),
+          dynastyDeck:   restDynasty,
+          provinces:     newProvinces,
+          dynastyDiscard: [{ ...card, location: 'dynastyDiscard' as ZoneId }, ...ps.dynastyDiscard],
+        },
+      });
+    }
+  },
+
+  // ── Imperial Favor / Lobby ────────────────────────────────────────────────
+
+  lobby: (personalityId, target = 'player') => {
+    const state = get();
+    const ps  = state[target];
+    const opp = state[target === 'player' ? 'opponent' : 'player'];
+
+    // Phase guard: skip for relay (target='opponent') since the initiating client already validated
+    if (target === 'player') {
+      if (state.turnPhase !== 'action' || state.activePlayer !== 'player') return;
+      if (ps.lobbyUsed) { pushLog('Lobby already used this turn', 'other', 'player'); return; }
+    }
+
+    const personality = ps.personalitiesHome.find(p => p.instanceId === personalityId);
+    if (!personality || personality.bowed) return;
+    const ph = Math.max(0, Number(personality.card.personalHonor) || 0);
+    if (personality.dishonored || ph < 1) {
+      if (target === 'player')
+        pushLog(`Cannot Lobby — ${personality.card.name} needs ≥1 Personal Honor and must be honorable`, 'other', 'player');
+      return;
+    }
+
+    const psEffHonor  = ps.familyHonor  + ps.lobbyBonus;
+    const oppEffHonor = opp.familyHonor + opp.lobbyBonus;
+    const success = psEffHonor > oppEffHonor;
+    const who = target === 'player' ? 'You' : 'Opponent';
+
+    if (success) {
+      const prev = state.imperialFavor === (target === 'player' ? 'opponent' : 'player') ? ' (taken from opponent)' : '';
+      pushLog(`Lobby: ${personality.card.name} bowed — ${who} take${target === 'player' ? '' : 's'} the Imperial Favor${prev} (${psEffHonor} > ${oppEffHonor})`, 'other', target);
+    } else {
+      pushLog(`Lobby: ${personality.card.name} bowed — ${who} failed (${psEffHonor} ≤ ${oppEffHonor})`, 'other', target);
+    }
+
+    if (target === 'player') relay({ type: 'lobby', personalityId });
+    set({
+      imperialFavor: success ? target : state.imperialFavor,
+      [target]: {
+        ...ps,
+        personalitiesHome: ps.personalitiesHome.map(p =>
+          p.instanceId === personalityId ? { ...p, bowed: true } : p,
+        ),
+        lobbyUsed: true,
+      },
+    });
+  },
+
+  useFavorLimited: (discardCardInstanceId, target = 'player') => {
+    const state = get();
+    const ps = state[target];
+
+    if (target === 'player') {
+      if (state.turnPhase !== 'action' || state.activePlayer !== 'player') return;
+      if (state.imperialFavor !== 'player') {
+        pushLog('Cannot use Rulebook Favor Limited — you do not control the Imperial Favor', 'other', 'player');
+        return;
+      }
+    }
+
+    if (target === 'player') {
+      const card = ps.hand.find(c => c.instanceId === discardCardInstanceId);
+      if (!card) return;
+      if (ps.fateDeck.length === 0) {
+        pushLog('Cannot use Rulebook Favor Limited — Fate deck is empty', 'other', 'player');
+        return;
+      }
+      const [drawn, ...restFate] = ps.fateDeck;
+      pushLog(`Rulebook Favor Limited: Discarded Imperial Favor + ${card.card.name} → drew a Fate card`, 'other', 'player');
+      relay({ type: 'use-favor-limited', discardCardInstanceId });
+      set({
+        imperialFavor: null,
+        [target]: {
+          ...ps,
+          hand: [...ps.hand.filter(c => c.instanceId !== discardCardInstanceId), { ...drawn, location: 'hand' as ZoneId }],
+          fateDiscard: [{ ...card, location: 'fateDiscard' as ZoneId }, ...ps.fateDiscard],
+          fateDeck: restFate,
+        },
+      });
+    } else {
+      // Relay: opponent used Favor Limited — we only know the Favor is gone; hand/deck are hidden
+      pushLog('Opponent used Rulebook Favor Limited — Imperial Favor discarded', 'other', 'opponent');
+      set({ imperialFavor: null });
+    }
+  },
+
+  useFavorBattle: (targetPersonalityId, actingTarget = 'player') => {
+    const state = get();
+    const { battleStage, battleAssignments, defenderAssignments } = state;
+    if (battleStage !== 'engage' && battleStage !== 'battleWindow') return;
+
+    if (actingTarget === 'player') {
+      if (state.imperialFavor !== 'player') {
+        pushLog('Cannot use Rulebook Favor Battle — you do not control the Imperial Favor', 'battle', 'player');
+        return;
+      }
+      // Target is an attacking enemy — in our model, opponent is the defender, so this applies
+      // when the OPPONENT attacked us (they are the attacker) and we are using the Favor to
+      // send one of their attackers home. Their attackers are tracked in defenderAssignments
+      // from our perspective (wait, no) — battleAssignments are OUR attackers.
+      // Actually: Favor Battle is used DURING battle by whoever holds the Favor.
+      // "Move a target attacking enemy Personality home" — the attacker is our player.
+      // So the enemy attacker = one of player.battleAssignments personalities.
+      // This means we're using it against OURSELVES? No — we can only use it when the opponent attacked.
+      // In that scenario battleAssignments would contain OPPONENT's attackers tracked as defenderAssignments.
+      // For simplicity: target any personality at the current battlefield on the opponent's side.
+      const tgt = state.opponent.personalitiesHome.find(p => p.instanceId === targetPersonalityId);
+      if (!tgt) return;
+      pushLog(`Rulebook Favor Battle: Discarded Imperial Favor — ${tgt.card.name} moved home`, 'battle', 'player');
+      relay({ type: 'use-favor-battle', targetPersonalityId });
+      set({
+        imperialFavor: null,
+        defenderAssignments: defenderAssignments.filter(d => d.instanceId !== targetPersonalityId),
+      });
+    } else {
+      // Relay: opponent used Favor Battle — remove target from our battleAssignments
+      const tgt = state.player.personalitiesHome.find(p => p.instanceId === targetPersonalityId);
+      pushLog(`Opponent used Rulebook Favor Battle — ${tgt?.card.name ?? 'Personality'} moved home`, 'battle', 'opponent');
+      set({
+        imperialFavor: null,
+        battleAssignments: battleAssignments.filter(a => a.instanceId !== targetPersonalityId),
+      });
+    }
+  },
+
+  // ── Tactical Advantage ────────────────────────────────────────────────────
+
+  useTacticalAdvantage: (personalityId, handCardInstanceId, target = 'player') => {
+    const state = get();
+    const ps = state[target];
+    const { battleStage } = state;
+    if (battleStage !== 'engage' && battleStage !== 'battleWindow') return;
+
+    const personality = ps.personalitiesHome.find(p => p.instanceId === personalityId);
+    if (!personality) return;
+    if (!personality.card.keywords.some(k => k.toLowerCase().trim() === 'tactician')) return;
+
+    const tacKey = `${personalityId}:tactical`;
+    if (ps.abilitiesUsed.includes(tacKey)) {
+      if (target === 'player') pushLog(`${personality.card.name} has already used Tactical Advantage this turn`, 'battle', 'player');
+      return;
+    }
+
+    const handCard = ps.hand.find(c => c.instanceId === handCardInstanceId);
+    // For opponent relay, hand cards are hidden — use a dummy Focus Value of 0 if card not found
+    const focusValue = handCard?.card.focus ?? 0;
+    const who = target === 'player' ? '' : 'Opponent\'s ';
+    const cardName = handCard?.card.name ?? '(hand card)';
+
+    pushLog(
+      `Tactical Advantage: ${who}${personality.card.name} discards ${cardName} (FV${focusValue}) → +${focusValue}F`,
+      'battle', target,
+    );
+    if (target === 'player') relay({ type: 'tactical-advantage', personalityId, handCardInstanceId });
+
+    const newHand = handCard
+      ? ps.hand.filter(c => c.instanceId !== handCardInstanceId)
+      : ps.hand;
+    const newDiscard = handCard
+      ? [{ ...handCard, location: 'fateDiscard' as ZoneId }, ...ps.fateDiscard]
+      : ps.fateDiscard;
+
+    set({
+      [target]: {
+        ...ps,
+        hand: newHand,
+        fateDiscard: newDiscard,
+        personalitiesHome: ps.personalitiesHome.map(p =>
+          p.instanceId === personalityId
+            ? { ...p, tempForceBonus: p.tempForceBonus + focusValue }
+            : p,
+        ),
+        abilitiesUsed: [...ps.abilitiesUsed, tacKey],
+      },
+    });
+  },
+
+  // ── Discipline ────────────────────────────────────────────────────────────
+
+  playDiscipline: (fateDiscardInstanceId, attachTargetId, target = 'player') => {
+    const state = get();
+    const ps = state[target];
+    const { turnPhase, battleStage } = state;
+    const card = ps.fateDiscard.find(c => c.instanceId === fateDiscardInstanceId);
+    if (!card) return;
+
+    const discCost = card.card.disciplineCost;
+    if (discCost === undefined) {
+      if (target === 'player') pushLog(`${card.card.name} does not have the Discipline trait`, 'other', 'player');
+      return;
+    }
+    const totalCost = (card.card.cost ?? 0) + discCost;
+
+    if (target === 'player') {
+      if (ps.goldPool < totalCost) {
+        pushLog(
+          `Cannot use Discipline — need ${totalCost}g (${card.card.cost}g + ${discCost}g Discipline), have ${ps.goldPool}g`,
+          'gold', 'player',
+        );
+        return;
+      }
+      const inAction = turnPhase === 'action';
+      const inBattle = battleStage === 'engage' || battleStage === 'battleWindow';
+      if (!inAction && !inBattle) {
+        pushLog('Cannot use Discipline outside of Action or Battle phase', 'other', 'player');
+        return;
+      }
+    }
+
+    const isAttachment = ['item', 'follower', 'spell'].includes(card.card.type);
+    const who = target === 'player' ? '' : "Opponent's ";
+    pushLog(
+      `Discipline: ${who}${card.card.name} played from discard (cost ${card.card.cost}g + ${discCost}g Discipline = ${totalCost}g) — removed from game`,
+      'other', target,
+    );
+    if (target === 'player') relay({ type: 'play-discipline', fateDiscardInstanceId, attachTargetId });
+
+    const newFateDiscard = ps.fateDiscard.filter(c => c.instanceId !== fateDiscardInstanceId);
+    let newPersonalitiesHome = ps.personalitiesHome;
+
+    if (isAttachment && attachTargetId) {
+      newPersonalitiesHome = ps.personalitiesHome.map(p =>
+        p.instanceId === attachTargetId
+          ? { ...p, attachments: [...p.attachments, { ...card, location: 'personalitiesHome' as ZoneId }] }
+          : p,
+      );
+      // Chi Death: check if attaching this item reduced effective Chi to ≤ 0
+      const attached = newPersonalitiesHome.find(p => p.instanceId === attachTargetId);
+      if (attached && calcEffectiveChi(attached) <= 0) {
+        pushLog(`Chi Death: ${attached.card.name}'s effective Chi reached 0`, 'battle', 'system');
+        newPersonalitiesHome = newPersonalitiesHome.filter(p => p.instanceId !== attachTargetId);
+      }
+    }
+
+    set({
+      [target]: {
+        ...ps,
+        goldPool: target === 'player' ? ps.goldPool - totalCost : ps.goldPool,
+        fateDiscard: newFateDiscard,
+        personalitiesHome: newPersonalitiesHome,
+      },
+    });
+  },
+
   // ── Battle ────────────────────────────────────────────────────────────────
 
   declareBattle: () => {
@@ -1177,12 +1610,30 @@ export const useGameStore = create<GameStore>((set, get) => {
   beginResolution: () => {
     const { battleAssignments } = get();
     if (battleAssignments.length === 0) {
-      // No one assigned — just end battle
       pushLog('No attackers assigned — ending battle', 'phase', 'system');
       set({ turnPhase: 'dynasty', battleStage: null, battleAssignments: [] });
       return;
     }
-    pushLog('Battle assignments committed — resolve battlefields', 'phase', 'system');
+    pushLog('Infantry committed — defender may now assign units', 'phase', 'system');
+    relay({ type: 'commit-infantry' });
+    set({ battleStage: 'defender-assigning' });
+  },
+
+  commitDefenders: () => {
+    pushLog('Defenders committed — Cavalry phase begins', 'phase', 'system');
+    relay({ type: 'commit-defenders' });
+    set({ battleStage: 'cavalry-assigning' });
+  },
+
+  commitCavalry: () => {
+    pushLog('Cavalry committed — defender may assign Cavalry', 'phase', 'system');
+    relay({ type: 'commit-cavalry' });
+    set({ battleStage: 'defender-cavalry-assigning' });
+  },
+
+  commitDefenderCavalry: () => {
+    pushLog('Defender Cavalry committed — proceeding to battle resolution', 'phase', 'system');
+    relay({ type: 'commit-defender-cavalry' });
     set({ battleStage: 'resolving' });
   },
 
@@ -1239,13 +1690,31 @@ export const useGameStore = create<GameStore>((set, get) => {
         const defenders = opponent.personalitiesHome.filter(p => defenderIds.includes(p.instanceId));
         const defendingForce = defenders.reduce((sum, p) => sum + calcUnitForce(p, true), 0);
 
-        const defenseTotal = opponent.provinceStrength + defendingForce;
-        const isBreached = attackingForce > defenseTotal;
+        // Fortification: holdings with the Fortification keyword add their Force to this province's defense
+        const fortificationForce = opponent.holdingsInPlay
+          .filter(h =>
+            h.fortificationProvince === provinceIndex &&
+            h.card.keywords.some(k => k.toLowerCase().trim() === 'fortification'),
+          )
+          .reduce((sum, h) => sum + Math.max(0, Number(h.card.force) || 0), 0);
 
-        const resultMsg = isBreached
-          ? `Province ${provinceIndex + 1} BROKEN! (${attackingForce}f vs ${opponent.provinceStrength}s + ${defendingForce}f)`
-          : `Province ${provinceIndex + 1} holds. (${attackingForce}f vs ${opponent.provinceStrength}s + ${defendingForce}f)`;
-        pushLog(resultMsg, 'phase', 'system');
+        if (fortificationForce > 0) {
+          pushLog(`Fortification adds ${fortificationForce}F to Province ${provinceIndex + 1} defense`, 'battle', 'system');
+        }
+        // Battle outcome: army force determines win/loss; province strength only affects province break.
+        // Tie = equal force with units on both sides.
+        const isTie        = attackingForce === defendingForce && attackers.length > 0 && defenders.length > 0;
+        const attackerWins = !isTie && attackingForce > defendingForce;
+        // Province breaks only when attacker wins AND their force exceeds defending force + province strength
+        const isBreached   = attackerWins && attackingForce > (defendingForce + opponent.provinceStrength + fortificationForce);
+
+        const outcomeLabel = isTie        ? `TIE (${attackingForce}F each)`
+          : attackerWins
+            ? (isBreached
+                ? `Attacker wins — Province ${provinceIndex + 1} BROKEN! (${attackingForce}F att vs ${defendingForce}F def + ${opponent.provinceStrength}s prov)`
+                : `Attacker wins — province holds (${attackingForce}F att vs ${defendingForce}F def, prov needs >${opponent.provinceStrength + defendingForce})`)
+            : `Defenders hold (${defendingForce}F def > ${attackingForce}F att)`;
+        pushLog(outcomeLabel, 'phase', 'system');
 
         // Discard any region attached to the province if it breaks
         const brokenRegion = isBreached ? province.region : null;
@@ -1269,90 +1738,162 @@ export const useGameStore = create<GameStore>((set, get) => {
             : opponent.dynastyDiscard,
         };
 
-        if (isBreached) {
-          // Attackers win → defenders die; attackers retreat home bowed (Conqueror exempt)
-          const defenderAttachments = defenders.flatMap(p => p.attachments);
-          const honorablyKilled  = defenders.filter(p => !p.dishonored);
-          const dishonorKilled   = defenders.filter(p => p.dishonored);
-          const defPhLoss = dishonorKilled.reduce(
-            (s, p) => s + Math.max(0, Number(p.card.personalHonor) || 0), 0,
+        const isResilient = (p: CardInstance) =>
+          p.card.keywords.some(k => k.toLowerCase().trim() === 'resilient') && !p.resilientUsed;
+
+        // Rehonoring rule: before a player gains Honor from kills, all dishonorable personalities
+        // in their winning army are rehonored instead — substituting for the Honor gain.
+        // In a tie, dishonorable personalities in each army are rehonored before being destroyed.
+        const applyRehonoring = (
+          allPs: CardInstance[],
+          armyIds: string[],
+          honorFromKills: number,
+          who: string,
+          side: 'player' | 'opponent',
+        ): { honorGained: number; updatedPs: CardInstance[] } => {
+          const dishonorableInArmy = allPs.filter(p => armyIds.includes(p.instanceId) && p.dishonored);
+          if (dishonorableInArmy.length > 0 && honorFromKills > 0) {
+            const names = dishonorableInArmy.map(p => p.card.name).join(', ');
+            pushLog(`${who}: ${names} rehonored — substitutes for ${honorFromKills} Honor gain`, 'honor', side);
+            return {
+              honorGained: 0,
+              updatedPs: allPs.map(p =>
+                dishonorableInArmy.some(d => d.instanceId === p.instanceId)
+                  ? { ...p, dishonored: false }
+                  : p,
+              ),
+            };
+          }
+          return { honorGained: honorFromKills, updatedPs: allPs };
+        };
+
+        if (isTie) {
+          // Both armies destroy each other; each side gains honor (or rehonors dishonorable instead)
+          const atkResilient   = attackers.filter(isResilient);
+          const defResilient   = defenders.filter(isResilient);
+          const atkTrulyKilled = attackers.filter(p => !isResilient(p));
+          const defTrulyKilled = defenders.filter(p => !isResilient(p));
+
+          if (atkResilient.length > 0) pushLog(`Resilient saved (att): ${atkResilient.map(p => p.card.name).join(', ')}`, 'battle', 'system');
+          if (defResilient.length > 0) pushLog(`Resilient saved (def): ${defResilient.map(p => p.card.name).join(', ')}`, 'battle', 'system');
+          if (atkTrulyKilled.length > 0) pushLog(`Attackers killed: ${atkTrulyKilled.map(p => p.card.name + (p.dishonored ? ' ☠' : '')).join(', ')}`, 'battle', 'system');
+          if (defTrulyKilled.length > 0) pushLog(`Defenders killed: ${defTrulyKilled.map(p => p.card.name + (p.dishonored ? ' ☠' : '')).join(', ')}`, 'battle', 'system');
+
+          const atkDishonorKilled = atkTrulyKilled.filter(p => p.dishonored);
+          const defDishonorKilled = defTrulyKilled.filter(p => p.dishonored);
+          const atkPhLoss = atkDishonorKilled.reduce((s, p) => s + Math.max(0, Number(p.card.personalHonor) || 0), 0);
+          const defPhLoss = defDishonorKilled.reduce((s, p) => s + Math.max(0, Number(p.card.personalHonor) || 0), 0);
+          if (atkPhLoss > 0) pushLog(`You lose ${atkPhLoss} Honor (dishonorably dead)`, 'honor', 'player');
+          if (defPhLoss > 0) pushLog(`Opponent loses ${defPhLoss} Honor (dishonorably dead)`, 'honor', 'opponent');
+
+          // Rehonoring substitutes for kill-honor in a tie
+          const { honorGained: atkHonorGained, updatedPs: atkPsAfterRehonor } = applyRehonoring(
+            player.personalitiesHome, assignedIds, defTrulyKilled.length * 2, 'You', 'player',
           );
-          if (defenders.length > 0) {
-            const names = defenders.map(p => p.card.name + (p.dishonored ? ' ☠' : '')).join(', ');
-            pushLog(`Defenders killed in battle: ${names}`, 'battle', 'system');
-          }
-          if (defPhLoss > 0) {
-            pushLog(`Opponent loses ${defPhLoss} Honor (dishonorably dead)`, 'honor', 'opponent');
-          }
-          const honorGain = defenders.length * 2;
-          if (honorGain > 0) {
-            pushLog(`You gain ${honorGain} Honor (${defenders.length} kill${defenders.length !== 1 ? 's' : ''})`, 'honor', 'player');
-          }
-          if (isBreached && brokenRegion) {
-            pushLog(`Region ${brokenRegion.card.name} discarded (province broken)`, 'other', 'system');
-          }
-          // Attackers return home — Conqueror units do not bow
+          const { honorGained: defHonorGained, updatedPs: defPsAfterRehonor } = applyRehonoring(
+            opponent.personalitiesHome, defenderIds, atkTrulyKilled.length * 2, 'Opponent', 'opponent',
+          );
+          if (atkHonorGained > 0) pushLog(`You gain ${atkHonorGained} Honor (${defTrulyKilled.length} kill${defTrulyKilled.length !== 1 ? 's' : ''})`, 'honor', 'player');
+          if (defHonorGained > 0) pushLog(`Opponent gains ${defHonorGained} Honor (${atkTrulyKilled.length} kill${atkTrulyKilled.length !== 1 ? 's' : ''})`, 'honor', 'opponent');
+
+          const atkKilledIds = atkTrulyKilled.map(p => p.instanceId);
+          const defKilledIds = defTrulyKilled.map(p => p.instanceId);
           newPlayer = {
             ...newPlayer,
-            familyHonor: newPlayer.familyHonor + honorGain,
-            personalitiesHome: player.personalitiesHome.map(p => {
+            familyHonor: newPlayer.familyHonor + atkHonorGained - atkPhLoss,
+            personalitiesHome: atkPsAfterRehonor
+              .filter(p => !atkKilledIds.includes(p.instanceId))
+              .map(p => atkResilient.some(r => r.instanceId === p.instanceId)
+                ? { ...p, attachments: [], resilientUsed: true, bowed: true } : p),
+            honorablyDead: [...player.honorablyDead, ...atkTrulyKilled.filter(p => !p.dishonored).map(p => ({ ...p, attachments: [] }))],
+            dishonorablelyDead: [...player.dishonorablelyDead, ...atkDishonorKilled.map(p => ({ ...p, attachments: [] }))],
+            fateDiscard: [...player.fateDiscard, ...atkTrulyKilled.flatMap(p => p.attachments), ...atkResilient.flatMap(p => p.attachments)],
+          };
+          newOpponent = {
+            ...newOpponent,
+            familyHonor: newOpponent.familyHonor + defHonorGained - defPhLoss,
+            personalitiesHome: defPsAfterRehonor
+              .filter(p => !defKilledIds.includes(p.instanceId))
+              .map(p => defResilient.some(r => r.instanceId === p.instanceId)
+                ? { ...p, attachments: [], resilientUsed: true } : p),
+            honorablyDead: [...opponent.honorablyDead, ...defTrulyKilled.filter(p => !p.dishonored).map(p => ({ ...p, attachments: [] }))],
+            dishonorablelyDead: [...opponent.dishonorablelyDead, ...defDishonorKilled.map(p => ({ ...p, attachments: [] }))],
+            fateDiscard: [...opponent.fateDiscard, ...defTrulyKilled.flatMap(p => p.attachments), ...defResilient.flatMap(p => p.attachments)],
+          };
+        } else if (attackerWins) {
+          // Attackers win → defenders die; attackers retreat home bowed (Conqueror exempt)
+          const resilientDefenders = defenders.filter(isResilient);
+          const defTrulyKilled     = defenders.filter(p => !isResilient(p));
+
+          if (resilientDefenders.length > 0) pushLog(`Resilient saved: ${resilientDefenders.map(p => p.card.name).join(', ')} (attachments destroyed)`, 'battle', 'system');
+          if (defTrulyKilled.length > 0) pushLog(`Defenders killed: ${defTrulyKilled.map(p => p.card.name + (p.dishonored ? ' ☠' : '')).join(', ')}`, 'battle', 'system');
+          if (brokenRegion) pushLog(`Region ${brokenRegion.card.name} discarded (province broken)`, 'other', 'system');
+
+          const defDishonorKilled = defTrulyKilled.filter(p => p.dishonored);
+          const defPhLoss = defDishonorKilled.reduce((s, p) => s + Math.max(0, Number(p.card.personalHonor) || 0), 0);
+          if (defPhLoss > 0) pushLog(`Opponent loses ${defPhLoss} Honor (dishonorably dead)`, 'honor', 'opponent');
+
+          // Rehonoring substitutes for kill-honor
+          const { honorGained, updatedPs: atkPsAfterRehonor } = applyRehonoring(
+            player.personalitiesHome, assignedIds, defTrulyKilled.length * 2, 'You', 'player',
+          );
+          if (honorGained > 0) pushLog(`You gain ${honorGained} Honor (${defTrulyKilled.length} kill${defTrulyKilled.length !== 1 ? 's' : ''})`, 'honor', 'player');
+
+          newPlayer = {
+            ...newPlayer,
+            familyHonor: newPlayer.familyHonor + honorGained,
+            personalitiesHome: atkPsAfterRehonor.map(p => {
               if (!assignedIds.includes(p.instanceId)) return p;
               return { ...p, bowed: isConquerorUnit(p) ? p.bowed : true };
             }),
           };
-          // Defenders die — dishonored → dishonorablelyDead + PH loss; others → honorablyDead
+          const defKilledIds = defTrulyKilled.map(p => p.instanceId);
           newOpponent = {
             ...newOpponent,
             familyHonor: newOpponent.familyHonor - defPhLoss,
-            personalitiesHome: opponent.personalitiesHome.filter(p => !defenderIds.includes(p.instanceId)),
-            honorablyDead: [
-              ...opponent.honorablyDead,
-              ...honorablyKilled.map(p => ({ ...p, attachments: [] })),
-            ],
-            dishonorablelyDead: [
-              ...opponent.dishonorablelyDead,
-              ...dishonorKilled.map(p => ({ ...p, attachments: [] })),
-            ],
-            fateDiscard: [...opponent.fateDiscard, ...defenderAttachments],
+            personalitiesHome: opponent.personalitiesHome
+              .filter(p => !defKilledIds.includes(p.instanceId))
+              .map(p => resilientDefenders.some(r => r.instanceId === p.instanceId)
+                ? { ...p, attachments: [], resilientUsed: true } : p),
+            honorablyDead: [...opponent.honorablyDead, ...defTrulyKilled.filter(p => !p.dishonored).map(p => ({ ...p, attachments: [] }))],
+            dishonorablelyDead: [...opponent.dishonorablelyDead, ...defDishonorKilled.map(p => ({ ...p, attachments: [] }))],
+            fateDiscard: [...opponent.fateDiscard, ...defTrulyKilled.flatMap(p => p.attachments), ...resilientDefenders.flatMap(p => p.attachments)],
           };
         } else {
-          // Defenders win → attackers die; defenders stay home
-          const attackerAttachments = attackers.flatMap(p => p.attachments);
-          const honorablyKilled  = attackers.filter(p => !p.dishonored);
-          const dishonorKilled   = attackers.filter(p => p.dishonored);
-          const atkPhLoss = dishonorKilled.reduce(
-            (s, p) => s + Math.max(0, Number(p.card.personalHonor) || 0), 0,
+          // Defenders win → attackers die; defenders stay home, do NOT bow
+          const resilientAttackers = attackers.filter(isResilient);
+          const atkTrulyKilled     = attackers.filter(p => !isResilient(p));
+
+          if (resilientAttackers.length > 0) pushLog(`Resilient saved: ${resilientAttackers.map(p => p.card.name).join(', ')} (attachments destroyed)`, 'battle', 'system');
+          if (atkTrulyKilled.length > 0) pushLog(`Attackers killed: ${atkTrulyKilled.map(p => p.card.name + (p.dishonored ? ' ☠' : '')).join(', ')}`, 'battle', 'system');
+
+          const atkDishonorKilled = atkTrulyKilled.filter(p => p.dishonored);
+          const atkPhLoss = atkDishonorKilled.reduce((s, p) => s + Math.max(0, Number(p.card.personalHonor) || 0), 0);
+          if (atkPhLoss > 0) pushLog(`You lose ${atkPhLoss} Honor (dishonorably dead)`, 'honor', 'player');
+
+          // Rehonoring substitutes for kill-honor
+          const { honorGained, updatedPs: defPsAfterRehonor } = applyRehonoring(
+            opponent.personalitiesHome, defenderIds, atkTrulyKilled.length * 2, 'Opponent', 'opponent',
           );
-          if (attackers.length > 0) {
-            const names = attackers.map(p => p.card.name + (p.dishonored ? ' ☠' : '')).join(', ');
-            pushLog(`Attackers killed in battle: ${names}`, 'battle', 'system');
-          }
-          if (atkPhLoss > 0) {
-            pushLog(`You lose ${atkPhLoss} Honor (dishonorably dead)`, 'honor', 'player');
-          }
-          const honorGain = attackers.length * 2;
-          if (honorGain > 0) {
-            pushLog(`Opponent gains ${honorGain} Honor (${attackers.length} kill${attackers.length !== 1 ? 's' : ''})`, 'honor', 'opponent');
-          }
-          // Attackers die — dishonored → dishonorablelyDead + PH loss; others → honorablyDead
+          if (honorGained > 0) pushLog(`Opponent gains ${honorGained} Honor (${atkTrulyKilled.length} kill${atkTrulyKilled.length !== 1 ? 's' : ''})`, 'honor', 'opponent');
+
+          const atkKilledIds = atkTrulyKilled.map(p => p.instanceId);
           newPlayer = {
             ...newPlayer,
             familyHonor: newPlayer.familyHonor - atkPhLoss,
-            personalitiesHome: player.personalitiesHome.filter(p => !assignedIds.includes(p.instanceId)),
-            honorablyDead: [
-              ...player.honorablyDead,
-              ...honorablyKilled.map(p => ({ ...p, attachments: [] })),
-            ],
-            dishonorablelyDead: [
-              ...player.dishonorablelyDead,
-              ...dishonorKilled.map(p => ({ ...p, attachments: [] })),
-            ],
-            fateDiscard: [...player.fateDiscard, ...attackerAttachments],
+            personalitiesHome: player.personalitiesHome
+              .filter(p => !atkKilledIds.includes(p.instanceId))
+              .map(p => resilientAttackers.some(r => r.instanceId === p.instanceId)
+                ? { ...p, attachments: [], resilientUsed: true, bowed: true } : p),
+            honorablyDead: [...player.honorablyDead, ...atkTrulyKilled.filter(p => !p.dishonored).map(p => ({ ...p, attachments: [] }))],
+            dishonorablelyDead: [...player.dishonorablelyDead, ...atkDishonorKilled.map(p => ({ ...p, attachments: [] }))],
+            fateDiscard: [...player.fateDiscard, ...atkTrulyKilled.flatMap(p => p.attachments), ...resilientAttackers.flatMap(p => p.attachments)],
           };
-          // Opponent gains honor
+          // Defenders stay home, don't bow — only update honor and personalities state
           newOpponent = {
             ...newOpponent,
-            familyHonor: newOpponent.familyHonor + honorGain,
+            familyHonor: newOpponent.familyHonor + honorGained,
+            personalitiesHome: defPsAfterRehonor,
           };
         }
 
@@ -1389,7 +1930,7 @@ export const useGameStore = create<GameStore>((set, get) => {
   endAttackPhase: () => {
     const { player, opponent, battleAssignments } = get();
     const assignedIds = battleAssignments.map(a => a.instanceId);
-    // Conqueror units don't bow; also clear all tempForceBonus on both sides
+    // Conqueror units don't bow on return home; also clear all tempForceBonus on both sides
     const newPersonalitiesHome = player.personalitiesHome.map(p => {
       const bowed = assignedIds.includes(p.instanceId) && !isConquerorUnit(p) ? true : p.bowed;
       return { ...p, bowed, tempForceBonus: 0 };
@@ -1408,11 +1949,28 @@ export const useGameStore = create<GameStore>((set, get) => {
   },
 
   assignDefender: (instanceId, provinceIndex) => {
-    const { defenderAssignments } = get();
+    const { defenderAssignments, opponent, player } = get();
     const filtered = defenderAssignments.filter(d => d.instanceId !== instanceId);
-    const cardName = get().opponent.personalitiesHome.find(p => p.instanceId === instanceId)?.card.name ?? 'personality';
-    pushLog(`Opponent assigned ${cardName} to defend Province ${provinceIndex + 1}`, 'other', 'opponent');
+    const cardName =
+      opponent.personalitiesHome.find(p => p.instanceId === instanceId)?.card.name ??
+      player.personalitiesHome.find(p => p.instanceId === instanceId)?.card.name ??
+      'personality';
+    // In multiplayer, the player may call this with their own personality (acting as defender)
+    const isPlayerUnit = player.personalitiesHome.some(p => p.instanceId === instanceId);
+    const sideLabel = isPlayerUnit ? 'You' : 'Opponent';
+    pushLog(`${sideLabel} assigned ${cardName} to defend Province ${provinceIndex + 1}`, 'other', isPlayerUnit ? 'player' : 'opponent');
+    if (isPlayerUnit) relay({ type: 'assign-defender', instanceId, provinceIndex });
     set({ defenderAssignments: [...filtered, { instanceId, provinceIndex }] });
+  },
+
+  unassignFromDefense: (instanceId) => {
+    const { opponent, player } = get();
+    const cardName =
+      player.personalitiesHome.find(p => p.instanceId === instanceId)?.card.name ??
+      opponent.personalitiesHome.find(p => p.instanceId === instanceId)?.card.name ??
+      'personality';
+    pushLog(`${cardName} removed from defense`, 'other', 'player');
+    set({ defenderAssignments: get().defenderAssignments.filter(d => d.instanceId !== instanceId) });
   },
 
   applyBattleKeyword: (sourceId, targetId, type, value) => {
@@ -1525,29 +2083,8 @@ export const useGameStore = create<GameStore>((set, get) => {
   },
 
   activateTactician: (personalityId, fateCardInstanceId) => {
-    const { player } = get();
-    const pers = player.personalitiesHome.find(p => p.instanceId === personalityId);
-    const card = player.hand.find(c => c.instanceId === fateCardInstanceId);
-    if (!pers || !card) return;
-
-    const focusVal = Math.max(0, Number(card.card.focus) || 0);
-    pushLog(
-      `${pers.card.name} Tactician — discarded ${card.card.name} (Focus ${focusVal}) for +${focusVal}F this battle`,
-      'battle', 'player',
-    );
-    set({
-      player: {
-        ...player,
-        hand: player.hand.filter(c => c.instanceId !== fateCardInstanceId),
-        fateDiscard: [{ ...card, location: 'fateDiscard' as ZoneId }, ...player.fateDiscard],
-        personalitiesHome: player.personalitiesHome.map(p =>
-          p.instanceId !== personalityId ? p : {
-            ...p,
-            tempForceBonus: p.tempForceBonus + focusVal,
-          },
-        ),
-      },
-    });
+    // Delegate to useTacticalAdvantage which handles relay, once-per-turn, and chi death
+    get().useTacticalAdvantage(personalityId, fateCardInstanceId, 'player');
   },
 
   reserveRecruit: (provinceIndex, sourcePersonalityId) => {
@@ -1726,6 +2263,7 @@ export const useGameStore = create<GameStore>((set, get) => {
       turnNumber: 1,
       gameLog: [],
       gameResult: null,
+      imperialFavor: null,
       battleAssignments: [],
       defenderAssignments: [],
       battleStage: null,

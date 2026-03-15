@@ -158,6 +158,16 @@ export type SerializedAction =
   | { type: 'apply-battle-keyword'; sourceId: string; targetId: string; kwType: string; value: number }
   | { type: 'activate-tactician'; personalityId: string; fateCardId: string }
   | { type: 'reserve-recruit';   provinceIndex: number; sourcePersonalityId: string }
+  | { type: 'commit-infantry' }
+  | { type: 'commit-defenders' }
+  | { type: 'commit-cavalry' }
+  | { type: 'commit-defender-cavalry' }
   | { type: 'pass-priority' }
+  | { type: 'use-kharmic'; source: 'hand' | 'province'; instanceId: string; provinceIndex?: number }
+  | { type: 'lobby'; personalityId: string }
+  | { type: 'use-favor-limited'; discardCardInstanceId: string }
+  | { type: 'use-favor-battle'; targetPersonalityId: string }
+  | { type: 'tactical-advantage'; personalityId: string; handCardInstanceId: string }
+  | { type: 'play-discipline'; fateDiscardInstanceId: string; attachTargetId?: string }
   | { type: 'sync-state' } // client asks server to snapshot their state
   ;
