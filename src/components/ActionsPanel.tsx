@@ -75,8 +75,10 @@ export function ActionsPanel({ player, onClose, onOpenDeckBrowser: _onOpenDeckBr
 
     if (/border keep/i.test(name)) {
       const usedOncePerGame = player.oncePerGameAbilitiesUsed.includes(holding.instanceId);
-      // Show the once-per-game cycle ability only after turn 1 (turn 1 already has Cycle rule above).
-      // Still show on turn 1 in case the player wants to use BK directly.
+      // Border Keep cycle is Limited — only available during the Action phase
+      // when it is the local player's turn. Show it outside that window so the
+      // player can see the ability exists, but mark it unavailable.
+      const phaseOk = isActionPhase && isActivePlayer;
       actions.push({
         id: `${holding.instanceId}-bk-cycle`,
         label: 'Border Keep — Recycle Provinces',
@@ -85,8 +87,12 @@ export function ActionsPanel({ player, onClose, onOpenDeckBrowser: _onOpenDeckBr
           'Limited, once per game: put any number of face-up province cards at the bottom of ' +
           'your Dynasty deck, then refill those provinces face-up. ' +
           'Border Keep also produces 2 Gold when bowed (double-click on the board).',
-        available: !usedOncePerGame,
-        disabledReason: usedOncePerGame ? 'Already used this game' : undefined,
+        available: !usedOncePerGame && phaseOk,
+        disabledReason: usedOncePerGame
+          ? 'Already used this game'
+          : !phaseOk
+            ? 'Limited — only usable during your Action phase'
+            : undefined,
         onActivate: () => {
           borderKeepCycle(holding.instanceId);
           onClose();

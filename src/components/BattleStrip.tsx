@@ -119,7 +119,7 @@ export function BattleStrip({
                 : 'Right-click hand cards to play Battle: abilities, then pass'}
             </span>
           </div>
-          <button onClick={onEndAttackPhase} className="btn-retreat">Retreat All</button>
+          <button onClick={onEndAttackPhase} className="btn-retreat">No Battle</button>
         </div>
 
         <div className={`flex items-stretch gap-3 px-3 py-2 rounded-lg border ${bf.border} bg-board-bg`}>
@@ -227,7 +227,7 @@ export function BattleStrip({
               onClick={onEndAttackPhase}
               className="text-[9px] px-2 py-0.5 rounded border border-gray-700 text-gray-500 hover:text-gray-300 hover:border-gray-500 transition-colors"
             >
-              Retreat All
+              No Battle
             </button>
           </div>
         </div>
@@ -287,7 +287,7 @@ export function BattleStrip({
               onClick={onEndAttackPhase}
               className="text-[9px] px-2 py-0.5 rounded border border-gray-700 text-gray-500 hover:text-gray-300 hover:border-gray-500 transition-colors"
             >
-              Retreat All
+              No Battle
             </button>
           </div>
         </div>
@@ -349,7 +349,7 @@ export function BattleStrip({
               onClick={onEndAttackPhase}
               className="text-[9px] px-2 py-0.5 rounded border border-gray-700 text-gray-500 hover:text-gray-300 hover:border-gray-500 transition-colors"
             >
-              Retreat All
+              No Battle
             </button>
           </div>
         </div>
@@ -369,6 +369,15 @@ export function BattleStrip({
   }
 
   // ── ASSIGNING or RESOLVING ────────────────────────────────────────────────
+
+  // Infantry phase: if ALL available (unbowed) personalities are Cavalry,
+  // there is nothing to assign here — allow proceeding with 0 assignments.
+  const nonCavalryAvailable = playerPersonalities.filter(
+    p => !isCavalryUnit(p) && !p.bowed,
+  );
+  const canCommitInfantry =
+    battleAssignments.length > 0 || nonCavalryAvailable.length === 0;
+
   return (
     <div className="flex flex-col gap-1.5 flex-shrink-0 px-3 py-2 bg-red-950/20 border-y border-red-900/40">
       <StepIndicator steps={STEPS} current={currentStep} />
@@ -376,25 +385,33 @@ export function BattleStrip({
       <div className="flex items-center justify-between gap-2">
         <span className="text-[8px] text-gray-500 italic flex-1 min-w-0">
           {battleStage === 'assigning'
-            ? 'Right-click your non-Cavalry personalities to assign attackers'
+            ? nonCavalryAvailable.length === 0
+              ? 'No non-Cavalry personalities to assign — skip to Cavalry phase'
+              : 'Right-click your non-Cavalry personalities to assign attackers'
             : 'Choose which battlefield to resolve first'}
         </span>
         <div className="flex items-center gap-1.5 flex-shrink-0">
           {battleStage === 'assigning' && (
             <button
               onClick={beginResolution}
-              disabled={battleAssignments.length === 0}
+              disabled={!canCommitInfantry}
               className="text-[9px] font-bold px-2.5 py-0.5 rounded border border-red-600 text-red-200 bg-red-950/60 hover:bg-red-900 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
-              title="Lock in infantry assignments — defender may now assign"
+              title={
+                nonCavalryAvailable.length === 0
+                  ? 'No infantry to assign — skip to Cavalry phase'
+                  : 'Lock in infantry assignments — defender may now assign'
+              }
             >
-              Commit Infantry →
+              {nonCavalryAvailable.length === 0 && battleAssignments.length === 0
+                ? 'Skip to Cavalry →'
+                : 'Commit Infantry →'}
             </button>
           )}
           <button
             onClick={onEndAttackPhase}
             className="text-[9px] px-2 py-0.5 rounded border border-gray-700 text-gray-500 hover:text-gray-300 hover:border-gray-500 transition-colors"
           >
-            Retreat All
+            No Battle
           </button>
         </div>
       </div>
