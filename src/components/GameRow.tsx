@@ -561,6 +561,9 @@ function HandFan({
 }
 
 
+/** How many vh of the Region card peek out below the province card. */
+const REGION_PEEK_VH = 2.4;
+
 function ProvinceSlot({ province, strength, forceHidden, h, isCycling, cycleSelected, onToggleCycleSelect, onProvinceRightClick, underAttack, attackForce, ...pp }: {
   province: Province; strength: number; forceHidden?: boolean; h: string;
   isCycling?: boolean;
@@ -572,12 +575,16 @@ function ProvinceSlot({ province, strength, forceHidden, h, isCycling, cycleSele
 } & SharedPreviewProps) {
   const faceDown   = forceHidden || !province.faceUp;
   const canRecruit = !forceHidden && province.faceUp && !!province.card;
-  const canCycleThis = isCycling && !forceHidden && province.faceUp && !!province.card;
+  const canCycleThis = isCycling && !forceHidden && !!province.card && !province.broken;
   const bf = BATTLEFIELD_STYLES[province.index];
+  const hasRegion = !!province.region;
+  const cardW = `calc(${h} * 2.5 / 3.5)`;
+  // Total height = card height + optional region peek strip below
+  const totalH = hasRegion ? `calc(${h} + ${REGION_PEEK_VH}vh)` : h;
 
   if (province.broken) {
     return (
-      <div className="flex flex-col items-center gap-0.5 flex-shrink-0 opacity-40" style={{ height: h, width: `calc(${h} * 2.5 / 3.5)` }}>
+      <div className="flex flex-col items-center gap-0.5 flex-shrink-0 opacity-40" style={{ height: h, width: cardW }}>
         <span className="text-[8px] text-gray-700 font-semibold">P{province.index + 1}</span>
         <div className="flex-1 w-full rounded-lg border-2 border-dashed border-red-900/60 bg-red-950/20 flex items-center justify-center">
           <span className="text-[9px] text-red-700 font-bold uppercase tracking-wider">Broken</span>
@@ -592,9 +599,9 @@ function ProvinceSlot({ province, strength, forceHidden, h, isCycling, cycleSele
         'flex flex-col items-center gap-0.5 flex-shrink-0 rounded-lg transition-all',
         underAttack ? `ring-2 ${bf.ring} p-0.5` : '',
       ].join(' ')}
-      style={{ height: `calc(${h} + ${underAttack ? '0px' : '0px'})`, width: 'auto' }}
+      style={{ height: totalH, width: 'auto' }}
     >
-      <div className="flex justify-between w-full px-0.5 flex-shrink-0 items-center">
+      <div className="flex justify-between flex-shrink-0 items-center" style={{ width: cardW }}>
         <span className="text-[8px] text-gray-700 font-semibold">P{province.index + 1}</span>
         {underAttack && attackForce !== undefined && (
           <span className={`text-[8px] font-bold px-1 rounded leading-tight ${bf.badge}`}>
@@ -607,42 +614,67 @@ function ProvinceSlot({ province, strength, forceHidden, h, isCycling, cycleSele
           </span>
         )}
       </div>
-      <div className="relative flex-1" style={{ width: `calc(${h} * 2.5 / 3.5)` }}>
-        {province.card
-          ? <GameCard
-              instance={province.card}
-              faceDown={faceDown}
-              className={[
-                'w-full h-full',
-                canCycleThis && cycleSelected  ? 'ring-2 ring-emerald-400 rounded-lg cursor-pointer' : '',
-                canCycleThis && !cycleSelected ? 'ring-1 ring-gray-600/60 rounded-lg cursor-pointer' : '',
-              ].join(' ')}
-              style={{ height: '100%', width: '100%', aspectRatio: '2.5/3.5' }}
-              onClick={canCycleThis ? onToggleCycleSelect : undefined}
-              onContextMenu={canRecruit && !isCycling
-                ? (e) => onProvinceRightClick?.(province, e)
-                : undefined
-              }
-              {...pp}
-            />
-          : <div
-              className="card-slot-empty w-full h-full"
-              style={{ aspectRatio: '2.5/3.5' }}
-            >
-              <span className="text-gray-700 text-[9px]">—</span>
-            </div>
-        }
-        {/* Region attached to this province */}
+
+      {/*
+        Card stack: province card on top (z-index 2), region peeking below (z-index 1).
+        The container is h tall for the province card + REGION_PEEK_VH for the strip below.
+      */}
+      <div className="relative flex-shrink-0" style={{ width: cardW, height: `calc(${h} + ${hasRegion ? REGION_PEEK_VH : 0}vh)` }}>
+
+        {/* ── Region peek strip (behind province card, bottom strip shows) ── */}
         {province.region && (
           <div
-            className="absolute bottom-0.5 inset-x-0 flex justify-center pointer-events-none"
+            className="absolute left-0 right-0 bottom-0 overflow-hidden rounded-b-lg border border-teal-700/50 cursor-pointer"
+            style={{ height: `${REGION_PEEK_VH}vh`, zIndex: 1 }}
             title={`Region: ${province.region.card.name}`}
+            onMouseEnter={(e) => pp.onPreview?.(province.region!.card, e)}
+            onMouseMove={(e)  => pp.onPreviewMove?.(e)}
+            onMouseLeave={()  => pp.onPreviewClear?.()}
+            onContextMenu={(e) => { e.preventDefault(); pp.onModal?.(province.region!.card); }}
           >
-            <span className="text-[6px] font-bold bg-teal-800/90 text-teal-200 px-1 py-px rounded leading-tight shadow max-w-full truncate">
-              ⬡ {province.region.card.name}
-            </span>
+            {/* Full card image — wrapper clips it to just the peek strip height */}
+            <CardImage
+              card={province.region.card}
+              className="w-full object-cover object-top pointer-events-none"
+              style={{ height: h } as React.CSSProperties}
+              alt={province.region.card.name}
+            />
+            {/* Name label overlaid on the peek */}
+            <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+              <span className="text-[5.5px] font-bold text-teal-200 bg-teal-950/80 px-1 py-px rounded leading-tight shadow max-w-full truncate">
+                {province.region.card.name}
+              </span>
+            </div>
           </div>
         )}
+
+        {/* ── Province card (on top of region) ── */}
+        <div className="absolute left-0 right-0 top-0" style={{ height: h, zIndex: 2 }}>
+          {province.card
+            ? <GameCard
+                instance={province.card}
+                faceDown={faceDown}
+                className={[
+                  'w-full h-full',
+                  canCycleThis && cycleSelected  ? 'ring-2 ring-emerald-400 rounded-lg cursor-pointer' : '',
+                  canCycleThis && !cycleSelected ? 'ring-1 ring-gray-600/60 rounded-lg cursor-pointer' : '',
+                ].join(' ')}
+                style={{ height: '100%', width: '100%', aspectRatio: '2.5/3.5' }}
+                onClick={canCycleThis ? onToggleCycleSelect : undefined}
+                onContextMenu={canRecruit && !isCycling
+                  ? (e) => onProvinceRightClick?.(province, e)
+                  : undefined
+                }
+                {...pp}
+              />
+            : <div
+                className="card-slot-empty w-full h-full"
+                style={{ aspectRatio: '2.5/3.5' }}
+              >
+                <span className="text-gray-700 text-[9px]">—</span>
+              </div>
+          }
+        </div>
       </div>
     </div>
   );

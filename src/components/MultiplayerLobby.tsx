@@ -9,7 +9,7 @@
  */
 import { useState, useEffect } from 'react';
 import { parseDeck } from '../engine/deckParser';
-import { UNICORN_TEST_DECK } from '../engine/testFixtures';
+import { UNICORN_TEST_DECK, SCORPION_TEST_DECK } from '../engine/testFixtures';
 import type { MultiplayerStatus } from '../hooks/useMultiplayer';
 
 interface Props {
@@ -36,8 +36,11 @@ export function MultiplayerLobby({
   onJoinRoom,
   onBack,
 }: Props) {
-  const [tab, setTab]         = useState<Tab>(initialRoomCode ? 'join' : 'create');
-  const [deckText, setDeckText] = useState(UNICORN_TEST_DECK);
+  const [tab, setTab]             = useState<Tab>(initialRoomCode ? 'join' : 'create');
+  const [createDeckText, setCreateDeckText] = useState(UNICORN_TEST_DECK);
+  const [joinDeckText,   setJoinDeckText]   = useState(SCORPION_TEST_DECK);
+  const deckText    = tab === 'create' ? createDeckText : joinDeckText;
+  const setDeckText = tab === 'create' ? setCreateDeckText : setJoinDeckText;
   const [roomCode, setRoomCode] = useState(initialRoomCode);
   const [parseError, setParseError] = useState<string | null>(null);
   const [copied, setCopied]   = useState(false);
@@ -91,6 +94,17 @@ export function MultiplayerLobby({
 
   const isLoading = status === 'connecting' || status === 'waiting' || status === 'reconnecting';
 
+  // Step labels shown while connecting / creating / joining
+  const steps =
+    tab === 'create'
+      ? ['Connect to server', 'Create room', 'Wait for opponent']
+      : ['Connect to server', 'Join room', 'Start game'];
+  const currentStep =
+    status === 'idle'       ? -1 :
+    status === 'connecting' ? 0  :
+    status === 'waiting'    ? 1  :
+    status === 'ready'      ? 2  : -1;
+
   return (
     <div className="min-h-screen bg-board-bg flex items-center justify-center p-4">
       <div className="w-full max-w-lg space-y-4">
@@ -126,6 +140,38 @@ export function MultiplayerLobby({
             </button>
           ))}
         </div>
+
+        {/* ── Progress steps (shown while loading) ──────────────── */}
+        {isLoading && (
+          <div className="rounded-xl border border-slate-700/50 bg-slate-900/50 p-4 space-y-3">
+            {steps.map((label, i) => {
+              const done    = i < currentStep;
+              const active  = i === currentStep;
+              const pending = i > currentStep;
+              return (
+                <div key={i} className="flex items-center gap-3">
+                  <div className={[
+                    'w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold flex-shrink-0 border',
+                    done    ? 'bg-emerald-600 border-emerald-500 text-white' :
+                    active  ? 'bg-sky-700 border-sky-500 text-white animate-pulse' :
+                    /* pending */ 'bg-slate-800 border-slate-600 text-slate-500',
+                  ].join(' ')}>
+                    {done ? '✓' : i + 1}
+                  </div>
+                  <span className={[
+                    'text-xs',
+                    done    ? 'text-emerald-400 line-through' :
+                    active  ? 'text-sky-300 font-semibold' :
+                    /* pending */ 'text-slate-600',
+                  ].join(' ')}>
+                    {label}
+                    {active && <span className="ml-1 animate-pulse">…</span>}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        )}
 
         {/* ── Waiting state ─────────────────────────────────────── */}
         {status === 'waiting' && roomId && (

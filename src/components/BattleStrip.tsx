@@ -20,13 +20,14 @@ interface Props {
   playerPersonalities: CardInstance[];
   opponentPersonalities: CardInstance[];
   opponentProvinces: Province[];
+  /** Wrapped by Board to also relay the action in multiplayer. */
+  onEndAttackPhase: () => void;
 }
 
-export function BattleStrip({ battleAssignments, defenderAssignments, battleStage, playerPersonalities, opponentPersonalities, opponentProvinces }: Props) {
+export function BattleStrip({ battleAssignments, defenderAssignments, battleStage, playerPersonalities, opponentPersonalities, opponentProvinces, onEndAttackPhase }: Props) {
   const beginResolution       = useGameStore(s => s.beginResolution);
   const selectBattlefield     = useGameStore(s => s.selectBattlefield);
   const passBattlefieldAction = useGameStore(s => s.passBattlefieldAction);
-  const endAttackPhase        = useGameStore(s => s.endAttackPhase);
   const currentBattlefield    = useGameStore(s => s.currentBattlefield);
   const battleWindowPriority  = useGameStore(s => s.battleWindowPriority);
   const battleWindowPasses    = useGameStore(s => s.battleWindowPasses);
@@ -115,7 +116,7 @@ export function BattleStrip({ battleAssignments, defenderAssignments, battleStag
                 : 'Right-click hand cards to play Battle: abilities, then pass'}
             </span>
           </div>
-          <button onClick={endAttackPhase} className="btn-retreat">Retreat All</button>
+          <button onClick={onEndAttackPhase} className="btn-retreat">Retreat All</button>
         </div>
 
         {/* Army summary */}
@@ -216,7 +217,7 @@ export function BattleStrip({ battleAssignments, defenderAssignments, battleStag
             </button>
           )}
           <button
-            onClick={endAttackPhase}
+            onClick={onEndAttackPhase}
             className="text-[9px] px-2 py-0.5 rounded border border-gray-700 text-gray-500 hover:text-gray-300 hover:border-gray-500 transition-colors"
           >
             Retreat All

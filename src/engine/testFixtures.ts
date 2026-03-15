@@ -71,6 +71,63 @@ export const UNICORN_TEST_DECK = `# Stronghold
 # Rings (1)
 1 Ring of the Void`;
 
+export const SCORPION_TEST_DECK = `# Pre-Game - (4) [4 distinct]
+
+# Holding - (2) [2 distinct]
+1 Bamboo Harvesters
+1 Border Keep
+
+# Sensei - (1) [1 distinct]
+1 Shika Sensei
+
+# Stronghold - (1) [1 distinct]
+1 The House of False Hope
+
+# Dynasty - (40) [18 distinct]
+
+# Celestial - (3) [3 distinct]
+1 Bayushi's Guidance
+1 Bayushi's Guidance - exp
+1 The Moon's Imperative
+
+# Event - (4) [3 distinct]
+1 Harsh Choices
+1 Reinforce the Line
+2 War of the Spirit Realms
+
+# Personality - (33) [12 distinct]
+3 Bayushi Amorie
+3 Bayushi Kanihime
+3 Shosuro Kanako
+1 Shosuro Kayo - exp
+3 Shosuro Kiyofumi
+3 Shosuro Nishu
+3 Shosuro Ozu
+3 Shosuro Sadao
+3 Shosuro Saigyo
+3 Shosuro Tagiso
+2 Shosuro Tanihara
+3 Soshi Mumoshi
+
+# Fate - (40) [13 distinct]
+
+# Follower - (10) [1 distinct]
+10 Fading Shadows
+
+# Strategy - (30) [12 distinct]
+1 Contested Ground
+3 Game of Sincerity
+3 Help from the Shadows
+3 Knife in the Darkness
+3 No Hope
+3 Nocturnal Attack
+3 Shadow Plays
+2 Smoke Cover
+2 Surprising Resistance
+3 The Second Feint
+2 Thoughtless Sacrifice
+2 Walk in Shadows`;
+
 export const PHOENIX_TEST_DECK = `# Stronghold
 1 The Majestic Temple of the Phoenix
 

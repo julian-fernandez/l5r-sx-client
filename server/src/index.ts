@@ -34,7 +34,9 @@ import type { PlayerState } from '../../src/types/cards.js';
 ensureCatalogLoaded();
 
 const PORT = process.env.PORT ? parseInt(process.env.PORT) : 3001;
-const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN ?? 'http://localhost:5173';
+// Allow any localhost port in dev so Vite's port auto-increment doesn't break CORS.
+// In production set CLIENT_ORIGIN to your actual domain.
+const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN ?? /^http:\/\/localhost:\d+$/;
 
 const app = express();
 app.use(cors({ origin: CLIENT_ORIGIN, credentials: true }));
@@ -51,8 +53,12 @@ const io = new Server(httpServer, {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function buildShareUrl(roomId: string): string {
-  return `${CLIENT_ORIGIN}/?room=${roomId}`;
+function buildShareUrl(roomId: string, referer?: string): string {
+  // Use the actual origin the client connected from (handles Vite port auto-increment).
+  const base = referer
+    ? new URL(referer).origin
+    : (typeof CLIENT_ORIGIN === 'string' ? CLIENT_ORIGIN : 'http://localhost:5173');
+  return `${base}/?room=${roomId}`;
 }
 
 function getPlayerIndex(room: ReturnType<typeof getRoom>, socketId: string): 0 | 1 | null {
@@ -74,10 +80,11 @@ io.on('connection', (socket) => {
     const room = createRoom(socket.id, deckString.trim());
     socket.join(room.id);
     const player = room.players[0];
+    const referer = socket.handshake.headers.origin as string | undefined;
     socket.emit('room-created', {
       roomId: room.id,
       playerId: player.playerId,
-      shareUrl: buildShareUrl(room.id),
+      shareUrl: buildShareUrl(room.id, referer),
     });
     console.log(`[room] created ${room.id} by ${socket.id}`);
   });

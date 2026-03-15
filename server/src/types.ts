@@ -150,6 +150,7 @@ export type SerializedAction =
   | { type: 'start-cycling' }
   | { type: 'toggle-cycle-province'; provinceIndex: number }
   | { type: 'end-cycling' }
+  | { type: 'commit-cycling'; selectedIndices: number[] }
   | { type: 'border-keep-cycle'; holdingInstanceId: string }
   | { type: 'play-ring-permanent'; instanceId: string }
   | { type: 'dishonor-personality'; instanceId: string; target: 'player' | 'opponent' }
@@ -157,5 +158,6 @@ export type SerializedAction =
   | { type: 'apply-battle-keyword'; sourceId: string; targetId: string; kwType: string; value: number }
   | { type: 'activate-tactician'; personalityId: string; fateCardId: string }
   | { type: 'reserve-recruit';   provinceIndex: number; sourcePersonalityId: string }
+  | { type: 'pass-priority' }
   | { type: 'sync-state' } // client asks server to snapshot their state
   ;

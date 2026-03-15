@@ -18,6 +18,16 @@ import type {
 } from '../../server/src/types';
 import type { CardInstance } from '../types/cards';
 
+/** Emit an event as soon as the socket is (or becomes) connected. */
+function emitWhenReady(event: string, payload: unknown) {
+  const socket = connectSocket();
+  if (socket.connected) {
+    socket.emit(event, payload);
+  } else {
+    socket.once('connect', () => socket.emit(event, payload));
+  }
+}
+
 export type MultiplayerStatus =
   | 'idle'
   | 'connecting'
@@ -69,21 +79,13 @@ export function useMultiplayer(options: UseMultiplayerOptions): MultiplayerContr
   useEffect(() => { optionsRef.current = options; }, [options]);
 
   useEffect(() => {
-    const socket = connectSocket();
+    // The socket singleton is registered here but NOT connected yet.
+    // Connection only happens when createRoom() or joinRoom() are explicitly called.
+    const socket = getSocket();
 
     const onConnect = () => {
       console.log('[socket] connected');
-      // Attempt reconnection if we have saved session data
-      const savedRoom   = sessionStorage.getItem(SESSION_KEY_ROOM);
-      const savedPlayer = sessionStorage.getItem(SESSION_KEY_PLAYER);
-      const savedIndex  = sessionStorage.getItem(SESSION_KEY_INDEX);
-      if (savedRoom && savedPlayer) {
-        setStatus('reconnecting');
-        setRoomId(savedRoom);
-        setPlayerId(savedPlayer);
-        setMyIndex(savedIndex ? (parseInt(savedIndex) as 0 | 1) : null);
-        socket.emit('reconnect-room', { roomId: savedRoom, playerId: savedPlayer });
-      }
+      // Status moves to 'waiting' only after room-created — no state change here
     };
 
     const onDisconnect = () => {
@@ -179,39 +181,34 @@ export function useMultiplayer(options: UseMultiplayerOptions): MultiplayerContr
   const createRoom = useCallback((deckString: string) => {
     setStatus('connecting');
     setError(null);
-    const socket = getSocket();
-    socket.emit('create-room', { deckString });
+    emitWhenReady('create-room', { deckString });
   }, []);
 
   const joinRoom = useCallback((roomCode: string, deckString: string) => {
     setStatus('connecting');
     setError(null);
-    const socket = getSocket();
-    socket.emit('join-room', { roomId: roomCode.toUpperCase(), deckString });
+    emitWhenReady('join-room', { roomId: roomCode.toUpperCase(), deckString });
   }, []);
 
   const sendAction = useCallback((action: SerializedAction) => {
-    const socket = getSocket();
     const savedRoom   = sessionStorage.getItem(SESSION_KEY_ROOM);
     const savedPlayer = sessionStorage.getItem(SESSION_KEY_PLAYER);
     if (!savedRoom || !savedPlayer) return;
-    socket.emit('game-action', { roomId: savedRoom, playerId: savedPlayer, action });
+    emitWhenReady('game-action', { roomId: savedRoom, playerId: savedPlayer, action });
   }, []);
 
   const drawFate = useCallback(() => {
-    const socket = getSocket();
     const savedRoom   = sessionStorage.getItem(SESSION_KEY_ROOM);
     const savedPlayer = sessionStorage.getItem(SESSION_KEY_PLAYER);
     if (!savedRoom || !savedPlayer) return;
-    socket.emit('draw-fate', { roomId: savedRoom, playerId: savedPlayer });
+    emitWhenReady('draw-fate', { roomId: savedRoom, playerId: savedPlayer });
   }, []);
 
   const syncState = useCallback((state: unknown) => {
-    const socket = getSocket();
     const savedRoom   = sessionStorage.getItem(SESSION_KEY_ROOM);
     const savedPlayer = sessionStorage.getItem(SESSION_KEY_PLAYER);
     if (!savedRoom || !savedPlayer) return;
-    socket.emit('sync-state', { roomId: savedRoom, playerId: savedPlayer, state });
+    emitWhenReady('sync-state', { roomId: savedRoom, playerId: savedPlayer, state });
   }, []);
 
   const leave = useCallback(() => {
