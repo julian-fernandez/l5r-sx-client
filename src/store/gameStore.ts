@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import type { BattleAssignment, CardInstance, LogCategory, LogEntry, NormalizedCard, ParsedDeck, PlayerState, Province, ZoneId } from '../types/cards';
-import { calcUnitForce, calcFollowerForce, createInstance, expandDeck, shuffle, isConquerorUnit, calcEffectiveChi, hasRepeatableAbility, calcEffectiveCost, calcProvinceStrength } from '../engine/gameActions';
-import type { BattleKeywordType } from '../engine/gameActions';
+import { calcUnitForce, calcFollowerForce, createInstance, expandDeck, shuffle, isConquerorUnit, calcEffectiveChi, hasRepeatableAbility, calcEffectiveCost, calcProvinceStrength, findReactionCandidates } from '../engine/gameActions';
+import type { BattleKeywordType, TriggerType, TriggerContext, ReactionCandidate } from '../engine/gameActions';
 import { parseDeck } from '../engine/deckParser';
 import { applyMidGameState, UNICORN_TEST_DECK, PHOENIX_TEST_DECK } from '../engine/testFixtures';
 import type { SerializedAction } from '../../server/src/types';
@@ -116,6 +116,17 @@ interface GameStore {
    * Gained via the Lobby player ability; spent by Rulebook Favor actions.
    */
   imperialFavor: 'player' | 'opponent' | null;
+  /**
+   * Set when a trigger fires and at least one player has a matching Reaction.
+   * The UI should present a ReactionPrompt modal while this is non-null.
+   * Cleared by resolveReaction() or declineReactions().
+   */
+  pendingReaction: {
+    trigger: import('../engine/gameActions').TriggerType;
+    context: import('../engine/gameActions').TriggerContext;
+    /** Candidates from BOTH sides (player + opponent) */
+    candidates: import('../engine/gameActions').ReactionCandidate[];
+  } | null;
 
   setCatalogLoaded: (loaded: boolean) => void;
   setStrongholdOverride: (o: { honor: number; gold: number; provinceStrength: number } | null) => void;
@@ -351,6 +362,28 @@ interface GameStore {
    * loses Family Honor equal to the personality's printed Personal Honor.
    */
   dishonorPersonality: (instanceId: string, target: 'player' | 'opponent') => void;
+
+  // ── Reaction system ───────────────────────────────────────────────────────────
+  /**
+   * Fire a trigger event. Scans all in-play cards for Reaction abilities that
+   * match the trigger; if any are found, sets `pendingReaction` so the UI can
+   * prompt the player. Safe to call even when no reactions exist (no-op then).
+   *
+   * In multiplayer, only the local player's cards are scanned — the opponent's
+   * reaction (if any) is handled on their own client.
+   */
+  fireTrigger: (trigger: TriggerType, context: TriggerContext) => void;
+  /**
+   * The player has chosen to use a specific Reaction.
+   * Marks the ability as used (once-per-turn) and clears pendingReaction.
+   * The actual card effect must be applied separately via the relevant store action.
+   */
+  resolveReaction: (candidate: ReactionCandidate) => void;
+  /**
+   * The player declines all available reactions for this trigger.
+   * Clears pendingReaction without applying any effects.
+   */
+  declineReactions: () => void;
 
   // ── Honor & Victory ───────────────────────────────────────────────────────────
   /**
@@ -648,6 +681,7 @@ export const useGameStore = create<GameStore>((set, get) => {
   gameLog: [],
   gameResult: null,
   imperialFavor: null,
+  pendingReaction: null,
   battleAssignments: [],
   defenderAssignments: [],
   battleStage: null,
@@ -928,6 +962,9 @@ export const useGameStore = create<GameStore>((set, get) => {
         proclaimUsed: proclaim ? true : ps.proclaimUsed,
       },
     });
+    if (!isHolding) {
+      get().fireTrigger('personality-recruited', { side: target, cardInstanceId: recruited.instanceId });
+    }
   },
 
   loadGame: (deck: ParsedDeck) => {
@@ -1774,6 +1811,14 @@ export const useGameStore = create<GameStore>((set, get) => {
             : `Defenders hold (${defendingForce}F def > ${attackingForce}F att)`;
         pushLog(outcomeLabel, 'phase', 'system');
 
+        // Fire outcome triggers so Reactions can respond before state is committed
+        if (attackerWins) {
+          get().fireTrigger('battle-won', { side: 'player', provinceIndex });
+          if (isBreached) get().fireTrigger('province-broken', { side: 'player', provinceIndex });
+        } else if (!isTie) {
+          get().fireTrigger('battle-lost', { side: 'player', provinceIndex });
+        }
+
         // Discard any region attached to the province if it breaks
         const brokenRegion = isBreached ? province.region : null;
         const newOpponentProvinces = opponent.provinces.map((p, i) =>
@@ -1836,6 +1881,8 @@ export const useGameStore = create<GameStore>((set, get) => {
           if (defResilient.length > 0) pushLog(`Resilient saved (def): ${defResilient.map(p => p.card.name).join(', ')}`, 'battle', 'system');
           if (atkTrulyKilled.length > 0) pushLog(`Attackers killed: ${atkTrulyKilled.map(p => p.card.name + (p.dishonored ? ' ☠' : '')).join(', ')}`, 'battle', 'system');
           if (defTrulyKilled.length > 0) pushLog(`Defenders killed: ${defTrulyKilled.map(p => p.card.name + (p.dishonored ? ' ☠' : '')).join(', ')}`, 'battle', 'system');
+          for (const p of atkTrulyKilled) get().fireTrigger('personality-killed', { side: 'player',   cardInstanceId: p.instanceId, provinceIndex });
+          for (const p of defTrulyKilled) get().fireTrigger('personality-killed', { side: 'opponent', cardInstanceId: p.instanceId, provinceIndex });
 
           const atkDishonorKilled = atkTrulyKilled.filter(p => p.dishonored);
           const defDishonorKilled = defTrulyKilled.filter(p => p.dishonored);
@@ -1924,6 +1971,7 @@ export const useGameStore = create<GameStore>((set, get) => {
 
           if (resilientAttackers.length > 0) pushLog(`Resilient saved: ${resilientAttackers.map(p => p.card.name).join(', ')} (attachments destroyed)`, 'battle', 'system');
           if (atkTrulyKilled.length > 0) pushLog(`Attackers killed: ${atkTrulyKilled.map(p => p.card.name + (p.dishonored ? ' ☠' : '')).join(', ')}`, 'battle', 'system');
+          for (const p of atkTrulyKilled) get().fireTrigger('personality-killed', { side: 'player', cardInstanceId: p.instanceId, provinceIndex });
 
           const atkDishonorKilled = atkTrulyKilled.filter(p => p.dishonored);
           const atkPhLoss = atkDishonorKilled.reduce((s, p) => s + Math.max(0, Number(p.card.personalHonor) || 0), 0);
@@ -2152,6 +2200,8 @@ export const useGameStore = create<GameStore>((set, get) => {
           },
         });
         get().checkVictoryConditions();
+        // Fire personality-killed trigger for keyword kills
+        get().fireTrigger('personality-killed', { side: 'opponent', cardInstanceId: targetId });
       }
     }
   },
@@ -2300,6 +2350,48 @@ export const useGameStore = create<GameStore>((set, get) => {
     });
   },
 
+  // ── Reaction system ───────────────────────────────────────────────────────────
+
+  fireTrigger: (trigger, context) => {
+    const { player, opponent } = get();
+
+    // Scan both sides for matching reactions.
+    // Opponent's hand is intentionally included in solo mode (both sides visible).
+    // In multiplayer, the opponent client runs their own fireTrigger independently,
+    // so scanning their hand here doesn't leak hidden info to the local player.
+    const playerCandidates   = findReactionCandidates(trigger, player,   'player');
+    const opponentCandidates = findReactionCandidates(trigger, opponent, 'opponent');
+    const candidates = [...playerCandidates, ...opponentCandidates];
+
+    if (candidates.length === 0) return; // no reactions available — proceed silently
+
+    set({ pendingReaction: { trigger, context, candidates } });
+  },
+
+  resolveReaction: (candidate) => {
+    const { player, opponent } = get();
+    const ps = candidate.side === 'player' ? player : opponent;
+
+    // Mark this specific reaction ability as used for this turn
+    const usedKey = `${candidate.instanceId}:r${candidate.abilityIndex}`;
+    set({
+      pendingReaction: null,
+      [candidate.side]: { ...ps, abilitiesUsed: [...ps.abilitiesUsed, usedKey] },
+    });
+    pushLog(
+      `${candidate.side === 'player' ? 'You' : 'Opponent'} react with ${candidate.cardName}: ${
+        candidate.abilityText.length > 80
+          ? candidate.abilityText.slice(0, 80) + '…'
+          : candidate.abilityText
+      }`,
+      'other', candidate.side,
+    );
+  },
+
+  declineReactions: () => {
+    set({ pendingReaction: null });
+  },
+
   // ── Honor & Victory ───────────────────────────────────────────────────────────
 
   checkVictoryConditions: () => {
@@ -2442,6 +2534,7 @@ export const useGameStore = create<GameStore>((set, get) => {
       pushLog(`${who} ${personality.card.name} is destroyed (→ ${isDishonored ? 'Dishonorably' : 'Honorably'} Dead)`, 'battle', target);
       if (isExpendable) pushLog(`${who} ${personality.card.name} Expendable — draw a Fate card`, 'draw', target);
       if (target === 'player') relay({ type: 'destroy-card', instanceId });
+      get().fireTrigger('personality-destroyed', { side: target, cardInstanceId: instanceId });
       set({
         [target]: {
           ...ps,
@@ -2585,6 +2678,7 @@ export const useGameStore = create<GameStore>((set, get) => {
       gameLog: [],
       gameResult: null,
       imperialFavor: null,
+      pendingReaction: null,
       battleAssignments: [],
       defenderAssignments: [],
       battleStage: null,

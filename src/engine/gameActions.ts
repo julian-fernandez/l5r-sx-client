@@ -27,10 +27,11 @@ export function getCardTimings(card: NormalizedCard): Set<string> {
   // Secondary: also honour explicit timing keywords (e.g. keyword = "Battle")
   for (const kw of card.keywords) {
     const lc = kw.toLowerCase().trim();
-    if (lc === 'limited' || lc.startsWith('limited:')) timings.add('limited');
-    if (lc === 'open'    || lc.startsWith('open:'))    timings.add('open');
-    if (lc === 'battle'  || lc.startsWith('battle:'))  timings.add('battle');
-    if (lc === 'engage'  || lc.startsWith('engage:'))  timings.add('engage');
+    if (lc === 'limited'   || lc.startsWith('limited:'))   timings.add('limited');
+    if (lc === 'open'      || lc.startsWith('open:'))      timings.add('open');
+    if (lc === 'battle'    || lc.startsWith('battle:'))    timings.add('battle');
+    if (lc === 'engage'    || lc.startsWith('engage:'))    timings.add('engage');
+    if (lc === 'reaction'  || lc === 'interrupt')          timings.add('reaction');
   }
 
   return timings;
@@ -38,7 +39,12 @@ export function getCardTimings(card: NormalizedCard): Set<string> {
 
 // ─── Parsed abilities ────────────────────────────────────────────────────────
 
-export type AbilityTiming = 'Limited' | 'Open' | 'Battle' | 'Engage';
+/**
+ * Timing windows for activated abilities.
+ * 'Reaction' covers both "Reaction:" and "Interrupt:" card text (they are
+ * equivalent in Samurai Extended).
+ */
+export type AbilityTiming = 'Limited' | 'Open' | 'Battle' | 'Engage' | 'Reaction';
 
 export interface ParsedAbility {
   /** 'trait' = passive text before any timing marker; others = activated ability */
@@ -50,30 +56,173 @@ export interface ParsedAbility {
 /**
  * Split a card's text field into individual abilities / trait sections.
  *
+ * Normalisation rules applied here:
+ *  - "Interrupt:" → "Reaction:" (equivalent in Samurai Extended)
+ *  - "Reaction: After engaging at …" → timing 'Engage' (those are Engage
+ *    abilities masquerading as reactions; they fire in the Engage window)
+ *
  * L5R card text looks like:
- *   "Kharmic. Open: Do X. Battle: Do Y."
- *   → [{ timing: 'trait', text: 'Kharmic.' },
- *      { timing: 'Open',   text: 'Do X.'   },
- *      { timing: 'Battle', text: 'Do Y.'   }]
+ *   "Kharmic. Open: Do X. Reaction: After Y: Do Z."
+ *   → [{ timing: 'trait',    text: 'Kharmic.'      },
+ *      { timing: 'Open',     text: 'Do X.'          },
+ *      { timing: 'Reaction', text: 'After Y: Do Z.' }]
  */
 export function parseCardAbilities(text: string): ParsedAbility[] {
   if (!text?.trim()) return [];
   const abilities: ParsedAbility[] = [];
 
-  // Split wherever a timing keyword starts (positive look-ahead keeps the keyword)
-  const segments = text.split(/(?=(?:Limited|Open|Battle|Engage):)/);
+  // Split wherever a timing keyword starts (look-ahead preserves the keyword)
+  const segments = text.split(/(?=(?:Limited|Open|Battle|Engage|Reaction|Interrupt):)/);
 
   for (const seg of segments) {
     const trimmed = seg.trim();
     if (!trimmed) continue;
-    const m = trimmed.match(/^(Limited|Open|Battle|Engage):\s*([\s\S]*)/);
+    const m = trimmed.match(/^(Limited|Open|Battle|Engage|Reaction|Interrupt):\s*([\s\S]*)/);
     if (m) {
-      abilities.push({ timing: m[1] as AbilityTiming, text: m[2].trim() });
+      const rawTiming = m[1];
+      const body      = m[2].trim();
+
+      // Normalise Interrupt → Reaction
+      let timing: AbilityTiming = rawTiming === 'Interrupt' ? 'Reaction' : rawTiming as AbilityTiming;
+
+      // "Reaction: After engaging at …" → Engage timing
+      if (timing === 'Reaction' && /^after\s+engaging\s+at\b/i.test(body)) {
+        timing = 'Engage';
+      }
+
+      abilities.push({ timing, text: body });
     } else {
       abilities.push({ timing: 'trait', text: trimmed });
     }
   }
   return abilities;
+}
+
+// ─── Reaction / Trigger system ───────────────────────────────────────────────
+
+/**
+ * Events that can fire a Reaction window.
+ * Add new trigger types here as more card interactions are implemented.
+ */
+export type TriggerType =
+  | 'battle-declared'           // attacker declares an attack on a province
+  | 'battle-action-announced'   // a Battle action/ability is announced
+  | 'battle-won'                // attacker wins a battle (force > defenders)
+  | 'battle-lost'               // attacker loses a battle (or ties)
+  | 'province-broken'           // a province is broken after a battle
+  | 'personality-destroyed'     // any personality is destroyed by a card effect
+  | 'personality-killed'        // a personality is killed in battle resolution
+  | 'personality-recruited'     // a personality is recruited from a province
+  | 'honor-gained'              // a player gains Family Honor
+  | 'honor-lost'                // a player loses Family Honor
+  ;
+
+/** Contextual data passed with a trigger. */
+export interface TriggerContext {
+  /** Which side caused the trigger (attacker, acting player, etc.) */
+  side: 'player' | 'opponent';
+  /** Instance ID of the card most relevant to the trigger (e.g. killed personality) */
+  cardInstanceId?: string;
+  /** Province index relevant to the trigger */
+  provinceIndex?: number;
+  /** Numeric amount (e.g. honor gained/lost) */
+  amount?: number;
+}
+
+/** A card that has a Reaction ability matching the fired trigger. */
+export interface ReactionCandidate {
+  /** Instance ID of the card holding the Reaction ability */
+  instanceId: string;
+  cardName: string;
+  /** Full ability text after "Reaction:" */
+  abilityText: string;
+  /** Which zone the card is in */
+  source: 'personalitiesHome' | 'holdingsInPlay' | 'hand' | 'fateDiscard';
+  /** Which player controls this card */
+  side: 'player' | 'opponent';
+  /** Index into the card's parsed abilities array (for once-per-turn tracking) */
+  abilityIndex: number;
+}
+
+/**
+ * Trigger pattern table: maps regex patterns found in reaction ability text
+ * (the part after "Reaction:") to TriggerTypes.
+ *
+ * The patterns are matched in order; the first match wins.
+ */
+const TRIGGER_PATTERNS: ReadonlyArray<[RegExp, TriggerType]> = [
+  [/after\s+(you\s+)?announc(e|ing)\s+a\s+battle\s+action/i,     'battle-action-announced'],
+  [/after\s+(you\s+)?declar(e|ing)\s+an?\s+attack/i,              'battle-declared'],
+  [/after\s+(you\s+)?win(ning)?\s+a?\s+battle/i,                  'battle-won'],
+  [/after\s+(you\s+)?los(e|ing)\s+a?\s+battle/i,                  'battle-lost'],
+  [/after\s+a?\s+province\s+is\s+broken/i,                        'province-broken'],
+  [/after\s+a\s+personality\s+is\s+(destroyed|killed)/i,          'personality-destroyed'],
+  [/after\s+a\s+personality\s+is\s+killed\s+in\s+battle/i,        'personality-killed'],
+  [/after\s+(you\s+)?recruit/i,                                    'personality-recruited'],
+  [/after\s+(you\s+)?(gain|gains)\s+(family\s+)?honor/i,          'honor-gained'],
+  [/after\s+(you\s+)?(lose|loses)\s+(family\s+)?honor/i,          'honor-lost'],
+];
+
+/**
+ * Given the body text of a Reaction ability (after "Reaction:"), return the
+ * TriggerType it responds to, or null if unrecognised.
+ */
+export function parseTriggerType(reactionText: string): TriggerType | null {
+  for (const [pattern, type] of TRIGGER_PATTERNS) {
+    if (pattern.test(reactionText)) return type;
+  }
+  return null;
+}
+
+/**
+ * Scan all in-play cards (and hand/discard) for Reaction abilities that match
+ * the given trigger type, filtering out any that have already been used this turn.
+ *
+ * Only the `player` side is scanned — opponent reactions in multiplayer must be
+ * handled client-side on the opponent's machine to avoid revealing hidden info.
+ * In solo mode, call this once for each side and merge the results.
+ */
+export function findReactionCandidates(
+  triggerType: TriggerType,
+  ps: PlayerState,
+  side: 'player' | 'opponent',
+): ReactionCandidate[] {
+  const candidates: ReactionCandidate[] = [];
+
+  const checkInstance = (inst: CardInstance, source: ReactionCandidate['source']) => {
+    const abilityKey = (idx: number) => `${inst.instanceId}:r${idx}`;
+    const abilities = parseCardAbilities(inst.card.text);
+    abilities.forEach((ability, idx) => {
+      if (ability.timing !== 'Reaction') return;
+      if (parseTriggerType(ability.text) !== triggerType) return;
+      if (ps.abilitiesUsed.includes(abilityKey(idx))) return; // once per turn
+      candidates.push({
+        instanceId:   inst.instanceId,
+        cardName:     inst.card.name,
+        abilityText:  ability.text,
+        source,
+        side,
+        abilityIndex: idx,
+      });
+    });
+  };
+
+  // Personalities and their attachments
+  for (const p of ps.personalitiesHome) {
+    checkInstance(p, 'personalitiesHome');
+    for (const att of p.attachments) checkInstance(att, 'personalitiesHome');
+  }
+
+  // Holdings
+  for (const h of ps.holdingsInPlay) checkInstance(h, 'holdingsInPlay');
+
+  // Hand cards (strategies, spells)
+  for (const c of ps.hand) checkInstance(c, 'hand');
+
+  // Fate discard (some cards react from discard)
+  for (const c of ps.fateDiscard) checkInstance(c, 'fateDiscard');
+
+  return candidates;
 }
 
 /**

@@ -5,6 +5,7 @@ import { isCavalryUnit, calcFollowerForce } from '../engine/gameActions';
 import type { BattleKeywordType } from '../engine/gameActions';
 import { getValidAttachTargets } from './CardResolutionOverlay';
 import { ManualResolutionOverlay } from './ManualResolutionOverlay';
+import { ReactionPrompt } from './ReactionPrompt';
 import { GameRow } from './GameRow';
 import { InPlayRow } from './InPlayRow';
 import { CardPreview } from './CardPreview';
@@ -654,6 +655,7 @@ export function Board({ player, opponent, activePlayer, onReset, multiplayerMode
         </>
       )}
 
+      <ReactionPrompt />
       <CardPreview preview={preview} />
       <CardModal card={modal} onClose={() => setModal(null)} />
       {deckBrowser && (
