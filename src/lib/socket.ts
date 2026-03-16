@@ -8,11 +8,13 @@ import { io, type Socket } from 'socket.io-client';
 
 let _socket: Socket | null = null;
 
+// In dev, Vite proxy forwards /socket.io → localhost:3001 (see vite.config.ts).
+// In production, set VITE_SERVER_URL to the deployed server (e.g. Render URL).
+const SERVER_URL = import.meta.env.VITE_SERVER_URL ?? '/';
+
 export function getSocket(): Socket {
   if (!_socket) {
-    // In dev the Vite proxy forwards /socket.io → localhost:3001.
-    // In production the same origin serves both client and server.
-    _socket = io('/', {
+    _socket = io(SERVER_URL, {
       path: '/socket.io',
       transports: ['websocket', 'polling'],
       autoConnect: false,
