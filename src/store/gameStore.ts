@@ -1172,7 +1172,22 @@ export const useGameStore = create<GameStore>((set, get) => {
 
     // ── First-turn: reveal the active player's provinces ──────────────────────
     if (turnPhase === 'straighten') {
-      const { state: revealed, resolved } = applyRevealProvinces(st[activePlayer]);
+      // Unbow everything for the active player — same logic as the End→next-turn
+      // transition, but applied here for the very first turn of the game (the
+      // only time turnPhase ever equals 'straighten'; subsequent turns skip
+      // straight to 'action' after the End Phase handles unbowing).
+      const ps = st[activePlayer];
+      const unbowed: PlayerState = {
+        ...ps,
+        strongholdBowed: false,
+        holdingsInPlay:   ps.holdingsInPlay.map(c => ({ ...c, bowed: false })),
+        personalitiesHome: ps.personalitiesHome.map(c => ({ ...c, bowed: false, tempForceBonus: 0, tempKeywords: [] })),
+        specialsInPlay:   ps.specialsInPlay.map(c => ({ ...c, bowed: false })),
+        goldPool: 0,
+        abilitiesUsed: [],
+        lobbyUsed: false,
+      };
+      const { state: revealed, resolved } = applyRevealProvinces(unbowed);
       const who = activePlayer === 'player' ? 'You' : 'Opponent';
       const resolvedMsg = resolved.length
         ? `: ${resolved.join('; ')}`
