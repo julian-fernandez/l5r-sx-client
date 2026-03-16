@@ -93,6 +93,13 @@ function candidateFilenames(card: NormalizedCard): string[] {
 }
 
 /**
+ * Base URL for card images.
+ * Set VITE_IMAGES_BASE_URL in your environment/Netlify to point to an external
+ * host (e.g. "https://my-cdn.com"). Defaults to "" (relative /images/ path).
+ */
+const IMAGES_BASE = (import.meta.env.VITE_IMAGES_BASE_URL as string | undefined ?? '').replace(/\/$/, '');
+
+/**
  * Given a card, return a prioritized list of image URL paths to try.
  * The caller (React component) tries them in order until one loads.
  */
@@ -100,14 +107,14 @@ export function resolveImageCandidates(card: NormalizedCard): string[] {
   // If the JSON already has a resolved path, try it first
   const paths: string[] = [];
   if (card.imagePath) {
-    paths.push(card.imagePath);
+    paths.push(card.imagePath.startsWith('http') ? card.imagePath : `${IMAGES_BASE}${card.imagePath}`);
   }
 
   const names = candidateFilenames(card);
 
   for (const folder of SET_FOLDER_PRIORITY) {
     for (const name of names) {
-      paths.push(`/images/${folder}/${name}.jpg`);
+      paths.push(`${IMAGES_BASE}/images/${folder}/${name}.jpg`);
     }
   }
 
