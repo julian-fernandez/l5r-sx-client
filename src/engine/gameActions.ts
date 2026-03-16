@@ -189,7 +189,14 @@ export function findReactionCandidates(
 ): ReactionCandidate[] {
   const candidates: ReactionCandidate[] = [];
 
-  const checkInstance = (inst: CardInstance, source: ReactionCandidate['source']) => {
+  /**
+   * Check a card for matching Reaction abilities.
+   * `inPlay` — when true, a bowed card's abilities may not be used (§4.3.g.1).
+   */
+  const checkInstance = (inst: CardInstance, source: ReactionCandidate['source'], inPlay = false) => {
+    // §4.3.g.1: abilities on bowed cards may not be used
+    if (inPlay && inst.bowed) return;
+
     const abilityKey = (idx: number) => `${inst.instanceId}:r${idx}`;
     const abilities = parseCardAbilities(inst.card.text);
     abilities.forEach((ability, idx) => {
@@ -207,19 +214,20 @@ export function findReactionCandidates(
     });
   };
 
-  // Personalities and their attachments
+  // Personalities and their attachments (in-play → bowed check applies)
   for (const p of ps.personalitiesHome) {
-    checkInstance(p, 'personalitiesHome');
-    for (const att of p.attachments) checkInstance(att, 'personalitiesHome');
+    checkInstance(p, 'personalitiesHome', true);
+    // Attachments on a bowed personality are also blocked (the unit is unavailable)
+    for (const att of p.attachments) checkInstance(att, 'personalitiesHome', p.bowed);
   }
 
-  // Holdings
-  for (const h of ps.holdingsInPlay) checkInstance(h, 'holdingsInPlay');
+  // Holdings (in-play → bowed check applies)
+  for (const h of ps.holdingsInPlay) checkInstance(h, 'holdingsInPlay', true);
 
-  // Hand cards (strategies, spells)
+  // Hand cards — not in play, bowed state doesn't apply
   for (const c of ps.hand) checkInstance(c, 'hand');
 
-  // Fate discard (some cards react from discard)
+  // Fate discard — not in play, bowed state doesn't apply
   for (const c of ps.fateDiscard) checkInstance(c, 'fateDiscard');
 
   return candidates;
@@ -749,12 +757,19 @@ export function getPersonalitiesAtProvince(
  * The returned array contains one entry per valid target, including province
  * cards when `filter.zones` includes `'provinces'`.
  */
+/**
+ * During battle, only cards whose unit is at the current battlefield may be
+ * legally targeted (§5.4.e.2 Rule of Location). Pass `currentBattlefield` to
+ * auto-enforce this when the filter doesn't already set `atBattlefield`.
+ * Passing `null` disables the restriction (non-battle targeting).
+ */
 export function getValidTargets(
   filter: TargetFilter,
   player: PlayerState,
   opponent: PlayerState,
   battleAssignments: BattleAssignment[],
   defenderAssignments: BattleAssignment[],
+  currentBattlefield: number | null = null,
 ): ValidTarget[] {
   const results: ValidTarget[] = [];
 
@@ -787,12 +802,19 @@ export function getValidTargets(
     if (filter.bowed !== undefined && inst.bowed !== filter.bowed) return false;
     if (filter.dishonored !== undefined && (inst.dishonored ?? false) !== filter.dishonored) return false;
 
-    if (filter.atBattlefield !== undefined) {
+    // §5.4.e.2 Rule of Location: during battle, personality targets must be at the
+    // current battlefield unless the filter explicitly requests a different zone
+    // (e.g. atHome, or a non-default atBattlefield override).
+    const effectiveBattlefield = filter.atBattlefield !== undefined
+      ? filter.atBattlefield
+      : (filter.atHome ? undefined : currentBattlefield ?? undefined);
+
+    if (effectiveBattlefield !== undefined) {
       const inBA = battleAssignments.some(
-        a => a.instanceId === inst.instanceId && a.provinceIndex === filter.atBattlefield,
+        a => a.instanceId === inst.instanceId && a.provinceIndex === effectiveBattlefield,
       );
       const inDA = defenderAssignments.some(
-        a => a.instanceId === inst.instanceId && a.provinceIndex === filter.atBattlefield,
+        a => a.instanceId === inst.instanceId && a.provinceIndex === effectiveBattlefield,
       );
       if (!inBA && !inDA) return false;
     }

@@ -263,6 +263,11 @@ interface GameStore {
   battleStage: 'assigning' | 'defender-assigning' | 'cavalry-assigning' | 'defender-cavalry-assigning' | 'resolving' | 'engage' | 'battleWindow' | null;
   /** Index of the opponent province currently being resolved (engage/battleWindow stages). */
   currentBattlefield: number | null;
+  /**
+   * Province indices that have already been fought this Attack Phase (§5.3.c.13).
+   * Every non-broken province must be resolved exactly once, even with no units.
+   */
+  resolvedBattlefields: number[];
   /** Who holds priority within the current engage/battleWindow pass cycle. */
   battleWindowPriority: 'player' | 'opponent';
   /** Consecutive passes within the current engage/battleWindow cycle. */
@@ -1074,6 +1079,7 @@ export const useGameStore = create<GameStore>((set, get) => {
   defenderAssignments: [],
   battleStage: null,
   currentBattlefield: null,
+  resolvedBattlefields: [],
   battleWindowPriority: 'player',
   battleWindowPasses: 0,
 
@@ -1091,7 +1097,7 @@ export const useGameStore = create<GameStore>((set, get) => {
       activePlayer: 'player', turnPhase: 'action', priority: 'player',
       consecutivePasses: 0, turnNumber: 1, strongholdOverride: null, gameLog: [],
       battleAssignments: [], defenderAssignments: [], battleStage: null,
-      currentBattlefield: null, battleWindowPriority: 'player', battleWindowPasses: 0,
+      currentBattlefield: null, resolvedBattlefields: [], battleWindowPriority: 'player', battleWindowPasses: 0,
       cyclingActive: null, gameResult: null,
       pendingReaction: null, pendingDuel: null, pendingTarget: null,
     });
@@ -1115,7 +1121,7 @@ export const useGameStore = create<GameStore>((set, get) => {
       set({
         turnPhase: 'attack', battleStage: 'assigning', battleAssignments: [], defenderAssignments: [],
         consecutivePasses: 0, priority: activePlayer,
-        currentBattlefield: null, battleWindowPriority: 'player', battleWindowPasses: 0,
+        currentBattlefield: null, resolvedBattlefields: [], battleWindowPriority: 'player', battleWindowPasses: 0,
         player: clearedPlayer, opponent: { ...opponent, goldPool: 0 },
       });
     } else {
@@ -1134,7 +1140,7 @@ export const useGameStore = create<GameStore>((set, get) => {
       set({
         turnPhase: 'attack', battleStage: 'assigning', battleAssignments: [], defenderAssignments: [],
         consecutivePasses: 0, priority: activePlayer,
-        currentBattlefield: null, battleWindowPriority: 'player', battleWindowPasses: 0,
+        currentBattlefield: null, resolvedBattlefields: [], battleWindowPriority: 'player', battleWindowPasses: 0,
         player: { ...player, goldPool: 0 }, opponent: clearedOpponent,
       });
     } else {
@@ -1431,6 +1437,7 @@ export const useGameStore = create<GameStore>((set, get) => {
       defenderAssignments: [],
       battleStage: null,
       currentBattlefield: null,
+      resolvedBattlefields: [],
       battleWindowPriority: 'player',
       battleWindowPasses: 0,
       cyclingActive: null,
@@ -1620,6 +1627,7 @@ export const useGameStore = create<GameStore>((set, get) => {
 
   breakProvince: (provinceIndex, target) => {
     const ps = get()[target];
+    const province = ps.provinces[provinceIndex];
     pushLog(`${target === 'player' ? 'Your' : "Opponent's"} province ${provinceIndex + 1} is broken`, 'other', target);
 
     // Discard any Fortification holdings attached to this province (SX rules)
@@ -1629,10 +1637,15 @@ export const useGameStore = create<GameStore>((set, get) => {
     const holdingsInPlay = ps.holdingsInPlay.filter(
       h => h.fortificationProvince !== provinceIndex,
     );
-    const dynastyDiscard = [
-      ...ps.dynastyDiscard,
+
+    // Discard the Region attached to the province (§5.4.f.9)
+    const dynastyDiscardAdditions: CardInstance[] = [
       ...fortifications.map(f => ({ ...f, location: 'dynastyDiscard' as ZoneId })),
     ];
+    if (province?.region) {
+      dynastyDiscardAdditions.push({ ...province.region, location: 'dynastyDiscard' as ZoneId });
+      pushLog(`${province.region.card.name} discarded — Region province broken`, 'discard', target);
+    }
     if (fortifications.length > 0) {
       pushLog(
         `${fortifications.map(f => f.card.name).join(', ')} discarded — Fortification province broken`,
@@ -1644,9 +1657,9 @@ export const useGameStore = create<GameStore>((set, get) => {
       [target]: {
         ...ps,
         holdingsInPlay,
-        dynastyDiscard,
+        dynastyDiscard: [...ps.dynastyDiscard, ...dynastyDiscardAdditions],
         provinces: ps.provinces.map((p, i) =>
-          i === provinceIndex ? { ...p, broken: true, card: null, faceUp: false } : p,
+          i === provinceIndex ? { ...p, broken: true, card: null, region: null, faceUp: false } : p,
         ),
       },
     });
@@ -2259,10 +2272,11 @@ export const useGameStore = create<GameStore>((set, get) => {
   },
 
   selectBattlefield: (provinceIndex) => {
-    const { opponent, battleAssignments } = get();
+    const { opponent, resolvedBattlefields } = get();
     const province = opponent.provinces[provinceIndex];
+    // §5.3.c.13: any non-broken, not-yet-resolved province is a valid battlefield
     if (!province || province.broken) return;
-    if (!battleAssignments.some(a => a.provinceIndex === provinceIndex)) return;
+    if (resolvedBattlefields.includes(provinceIndex)) return;
 
     pushLog(`Battlefield — Province ${provinceIndex + 1} selected for resolution`, 'phase', 'system');
     pushLog('Engage window open — Defender has first action', 'phase', 'system');
@@ -2527,6 +2541,14 @@ export const useGameStore = create<GameStore>((set, get) => {
 
         const remainingAssignments = battleAssignments.filter(a => a.provinceIndex !== provinceIndex);
 
+        // §5.3.c.13: every non-broken province must be fought exactly once.
+        // Track resolved battlefields independently of assignments.
+        const nowResolved = [...st.resolvedBattlefields, provinceIndex];
+        // "Done" when every province is either broken or has already been fought.
+        const allDone = newOpponent.provinces.every(
+          p => p.broken || nowResolved.includes(p.index),
+        );
+
         // Per SX 5.4.f.18: defending units only return home after the LAST battle of the
         // Attack Phase (or a standalone battle). If defenders won this battle, their
         // personalities survived — they stay "at their battlefield" until the phase ends,
@@ -2536,13 +2558,13 @@ export const useGameStore = create<GameStore>((set, get) => {
           ? defenderAssignments.filter(d => d.provinceIndex !== provinceIndex)
           : defenderAssignments; // defenders survived → stay at Province until Attack Phase ends
 
-        if (remainingAssignments.length === 0) {
+        if (allDone) {
           // Last battlefield resolved — surviving defenders now return home (per 5.4.f.18)
           pushLog('All battlefields resolved → Dynasty Phase', 'phase', 'system');
           set({
             turnPhase: 'dynasty', battleStage: null,
             battleAssignments: [], defenderAssignments: [],
-            currentBattlefield: null, battleWindowPasses: 0,
+            currentBattlefield: null, resolvedBattlefields: [], battleWindowPasses: 0,
             opponent: newOpponent,
             player:   newPlayer,
           });
@@ -2550,6 +2572,7 @@ export const useGameStore = create<GameStore>((set, get) => {
           pushLog('Battlefield resolved — select next battlefield to resolve', 'phase', 'system');
           set({
             battleStage: 'resolving', currentBattlefield: null,
+            resolvedBattlefields: nowResolved,
             battleWindowPriority: 'opponent', battleWindowPasses: 0,
             battleAssignments: remainingAssignments,
             defenderAssignments: remainingDefenders,
@@ -3698,8 +3721,13 @@ export const useGameStore = create<GameStore>((set, get) => {
   // ── Targeting system ──────────────────────────────────────────────────────────
 
   requestTarget: (filter, label, callback, allowCancel = true) => {
-    const { player, opponent, battleAssignments, defenderAssignments } = get();
-    const validTargets = getValidTargets(filter, player, opponent, battleAssignments, defenderAssignments);
+    const { player, opponent, battleAssignments, defenderAssignments, battleStage, currentBattlefield } = get();
+    // §5.4.e.2: during battle, pass currentBattlefield so targeting is restricted to units there
+    const inBattle = battleStage === 'engage' || battleStage === 'battleWindow';
+    const validTargets = getValidTargets(
+      filter, player, opponent, battleAssignments, defenderAssignments,
+      inBattle ? currentBattlefield : null,
+    );
     if (validTargets.length === 0) {
       // No valid targets — call back with a no-op sentinel so effects can handle "no target" gracefully
       pushLog(`No valid targets for: ${label}`, 'other', 'system');
@@ -3765,6 +3793,7 @@ export const useGameStore = create<GameStore>((set, get) => {
       defenderAssignments: [],
       battleStage: null,
       currentBattlefield: null,
+      resolvedBattlefields: [],
       battleWindowPriority: 'player',
       battleWindowPasses: 0,
       cyclingActive: null,

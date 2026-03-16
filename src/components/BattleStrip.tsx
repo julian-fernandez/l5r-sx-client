@@ -39,6 +39,7 @@ export function BattleStrip({
   const selectBattlefield     = useGameStore(s => s.selectBattlefield);
   const passBattlefieldAction = useGameStore(s => s.passBattlefieldAction);
   const currentBattlefield    = useGameStore(s => s.currentBattlefield);
+  const resolvedBattlefields  = useGameStore(s => s.resolvedBattlefields);
   const battleWindowPriority  = useGameStore(s => s.battleWindowPriority);
   const battleWindowPasses    = useGameStore(s => s.battleWindowPasses);
 
@@ -402,10 +403,16 @@ export function BattleStrip({
           )}
         </div>
 
+        {/* §5.3.c.13: show every non-broken, unresolved province — even empty ones */}
         <div className="flex gap-3 flex-wrap">
-          {battlefields.map(([provinceIndex, assignments]) => {
+          {opponentProvinces
+            .filter(p => !p.broken && !resolvedBattlefields.includes(p.index))
+            .map(province => {
+            const provinceIndex = province.index;
+            const assignments = byProvince.get(provinceIndex) ?? [];
             const bf = BATTLEFIELD_STYLES[provinceIndex] ?? BATTLEFIELD_STYLES[0];
             const { defenseTotal, attackers, defenders, totalForce, winning } = stats(provinceIndex, assignments);
+            const isEmpty = attackers.length === 0 && defenders.length === 0;
             return (
               <button
                 key={provinceIndex}
@@ -419,16 +426,21 @@ export function BattleStrip({
                   `${bf.border} hover:bg-orange-950/30 bg-board-bg`,
                 ].join(' ')}
                 style={{ minWidth: 180 }}
-                title={`Fight at Province ${provinceIndex + 1} — ${totalForce}f vs ${defenseTotal}`}
+                title={isEmpty
+                  ? `Province ${provinceIndex + 1} — empty battlefield (0f vs 0f, auto-resolves as tie)`
+                  : `Fight at Province ${provinceIndex + 1} — ${totalForce}f vs ${defenseTotal}`}
               >
                 {/* Header */}
                 <div className="flex items-center justify-between gap-3">
                   <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${bf.badge}`}>
                     Province {provinceIndex + 1}
                   </span>
-                  <span className={`text-[10px] font-bold tabular-nums ${winning ? 'text-emerald-400' : 'text-red-400'}`}>
-                    {totalForce}f vs {defenseTotal}
-                  </span>
+                  {isEmpty
+                    ? <span className="text-[10px] text-gray-500 italic">empty</span>
+                    : <span className={`text-[10px] font-bold tabular-nums ${winning ? 'text-emerald-400' : 'text-red-400'}`}>
+                        {totalForce}f vs {defenseTotal}
+                      </span>
+                  }
                 </div>
 
                 {/* Attacker list */}
@@ -454,16 +466,19 @@ export function BattleStrip({
                     ))}
                   </div>
                 )}
-                {defenders.length === 0 && (
+                {!isEmpty && defenders.length === 0 && (
                   <p className="text-[7px] text-gray-700 italic">No defenders</p>
                 )}
 
                 {/* Result preview */}
-                <div className={`text-center text-[9px] font-bold py-1 rounded mt-0.5 ${
-                  winning ? 'bg-emerald-900/40 text-emerald-300' : 'bg-gray-900/60 text-gray-500'
-                }`}>
-                  {winning ? '→ BREAK' : '→ Province Holds'}
-                </div>
+                {isEmpty
+                  ? <div className="text-center text-[9px] py-1 rounded mt-0.5 bg-gray-900/40 text-gray-500 italic">0f vs 0f — no outcome</div>
+                  : <div className={`text-center text-[9px] font-bold py-1 rounded mt-0.5 ${
+                      winning ? 'bg-emerald-900/40 text-emerald-300' : 'bg-gray-900/60 text-gray-500'
+                    }`}>
+                      {winning ? '→ BREAK' : '→ Province Holds'}
+                    </div>
+                }
               </button>
             );
           })}
