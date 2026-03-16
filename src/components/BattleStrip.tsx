@@ -100,6 +100,7 @@ export function BattleStrip({
     const { strength, defenderForce, defenseTotal, attackers, defenders, totalForce, winning } = stats(pIdx, assignments);
     const bf          = BATTLEFIELD_STYLES[pIdx] ?? BATTLEFIELD_STYLES[0];
     const isEngage    = battleStage === 'engage';
+    const isAttackerInWindow = !multiplayerMode || activePlayer === 'player';
     const youHasPriority = battleWindowPriority === 'player';
     const oppHasPriority = battleWindowPriority === 'opponent';
     const onePassMade    = battleWindowPasses === 1;
@@ -119,7 +120,11 @@ export function BattleStrip({
                 : 'Right-click hand cards to play Battle: abilities, then pass'}
             </span>
           </div>
-          <button onClick={onEndAttackPhase} className="btn-retreat">No Battle</button>
+          {isAttackerInWindow && (
+            <button onClick={onEndAttackPhase} className="text-[9px] px-2 py-0.5 rounded border border-gray-700 text-gray-500 hover:text-gray-300 hover:border-gray-500 transition-colors">
+              Skip to Dynasty
+            </button>
+          )}
         </div>
 
         <div className={`flex items-stretch gap-3 px-3 py-2 rounded-lg border ${bf.border} bg-board-bg`}>
@@ -223,12 +228,14 @@ export function BattleStrip({
                 Finish Assignments →
               </button>
             )}
-            <button
-              onClick={onEndAttackPhase}
-              className="text-[9px] px-2 py-0.5 rounded border border-gray-700 text-gray-500 hover:text-gray-300 hover:border-gray-500 transition-colors"
-            >
-              No Battle
-            </button>
+            {(!multiplayerMode || activePlayer === 'player') && (
+              <button
+                onClick={onEndAttackPhase}
+                className="text-[9px] px-2 py-0.5 rounded border border-gray-700 text-gray-500 hover:text-gray-300 hover:border-gray-500 transition-colors"
+              >
+                Skip to Dynasty
+              </button>
+            )}
           </div>
         </div>
 
@@ -275,20 +282,22 @@ export function BattleStrip({
           </div>
           <div className="flex items-center gap-1.5 flex-shrink-0">
             {isAttacker && (
-              <button
-                onClick={commitCavalry}
-                className="text-[9px] font-bold px-2.5 py-0.5 rounded border border-yellow-600 text-yellow-200 bg-yellow-950/60 hover:bg-yellow-900 transition-colors"
-                title="Lock in Cavalry assignments — proceed to battle resolution"
+              <>
+                <button
+                  onClick={commitCavalry}
+                  className="text-[9px] font-bold px-2.5 py-0.5 rounded border border-yellow-600 text-yellow-200 bg-yellow-950/60 hover:bg-yellow-900 transition-colors"
+                  title="Lock in Cavalry assignments — proceed to battle resolution"
                 >
                   {hasCavAvailable ? 'Finish Assignments →' : 'Skip →'}
-              </button>
+                </button>
+                <button
+                  onClick={onEndAttackPhase}
+                  className="text-[9px] px-2 py-0.5 rounded border border-gray-700 text-gray-500 hover:text-gray-300 hover:border-gray-500 transition-colors"
+                >
+                  Skip to Dynasty
+                </button>
+              </>
             )}
-            <button
-              onClick={onEndAttackPhase}
-              className="text-[9px] px-2 py-0.5 rounded border border-gray-700 text-gray-500 hover:text-gray-300 hover:border-gray-500 transition-colors"
-            >
-              No Battle
-            </button>
           </div>
         </div>
 
@@ -341,16 +350,18 @@ export function BattleStrip({
                 onClick={commitDefenderCavalry}
                 className="text-[9px] font-bold px-2.5 py-0.5 rounded border border-rose-600 text-rose-200 bg-rose-950/60 hover:bg-rose-900 transition-colors"
                 title="Lock in Cavalry defenders — proceed to battle resolution"
-                >
-                  {defCavAvailable ? 'Finish Assignments →' : 'Skip →'}
+              >
+                {defCavAvailable ? 'Finish Assignments →' : 'Skip →'}
               </button>
             )}
-            <button
-              onClick={onEndAttackPhase}
-              className="text-[9px] px-2 py-0.5 rounded border border-gray-700 text-gray-500 hover:text-gray-300 hover:border-gray-500 transition-colors"
-            >
-              No Battle
-            </button>
+            {(!multiplayerMode || activePlayer === 'player') && (
+              <button
+                onClick={onEndAttackPhase}
+                className="text-[9px] px-2 py-0.5 rounded border border-gray-700 text-gray-500 hover:text-gray-300 hover:border-gray-500 transition-colors"
+              >
+                Skip to Dynasty
+              </button>
+            )}
           </div>
         </div>
 
@@ -370,18 +381,25 @@ export function BattleStrip({
 
   // ── PICK BATTLEFIELD (resolving) ─────────────────────────────────────────
   if (battleStage === 'resolving') {
+    const isAttackerResolving = !multiplayerMode || activePlayer === 'player';
     return (
       <div className="flex flex-col gap-2 flex-shrink-0 px-3 py-2 bg-orange-950/25 border-y border-orange-800/50">
         <StepIndicator steps={STEPS} current={currentStep} />
 
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <span className="text-[11px] font-bold text-orange-300 animate-pulse">⚔ Pick a Battlefield</span>
-            <span className="text-[8px] text-gray-500">Attacker chooses which province to resolve — Engage window opens next</span>
+            <span className="text-[11px] font-bold text-orange-300 animate-pulse">
+              {isAttackerResolving ? '⚔ Pick a Battlefield' : '⏳ Waiting for attacker to pick a battlefield…'}
+            </span>
+            {isAttackerResolving && (
+              <span className="text-[8px] text-gray-500">Attacker chooses which province to resolve — Engage window opens next</span>
+            )}
           </div>
-          <button onClick={onEndAttackPhase} className="text-[9px] px-2 py-0.5 rounded border border-gray-700 text-gray-500 hover:text-gray-300 hover:border-gray-500 transition-colors">
-            No Battle
-          </button>
+          {isAttackerResolving && (
+            <button onClick={onEndAttackPhase} className="text-[9px] px-2 py-0.5 rounded border border-gray-700 text-gray-500 hover:text-gray-300 hover:border-gray-500 transition-colors">
+              Skip to Dynasty
+            </button>
+          )}
         </div>
 
         <div className="flex gap-3 flex-wrap">
@@ -391,11 +409,14 @@ export function BattleStrip({
             return (
               <button
                 key={provinceIndex}
-                onClick={() => selectBattlefield(provinceIndex)}
+                onClick={() => isAttackerResolving && selectBattlefield(provinceIndex)}
+                disabled={!isAttackerResolving}
                 className={[
                   'flex flex-col gap-1.5 px-3 py-2 rounded-xl border-2 text-left transition-all duration-150',
-                  'animate-pulse hover:animate-none hover:scale-[1.03] active:scale-100',
-                  `${bf.border} hover:bg-orange-950/30 bg-board-bg cursor-pointer`,
+                  isAttackerResolving
+                    ? 'animate-pulse hover:animate-none hover:scale-[1.03] active:scale-100 cursor-pointer'
+                    : 'opacity-60 cursor-not-allowed',
+                  `${bf.border} hover:bg-orange-950/30 bg-board-bg`,
                 ].join(' ')}
                 style={{ minWidth: 180 }}
                 title={`Fight at Province ${provinceIndex + 1} — ${totalForce}f vs ${defenseTotal}`}
@@ -453,6 +474,8 @@ export function BattleStrip({
 
   // ── ASSIGNING ─────────────────────────────────────────────────────────────
 
+  const isAttacker = !multiplayerMode || activePlayer === 'player';
+
   // Infantry phase: if ALL available (unbowed) personalities are Cavalry,
   // there is nothing to assign here — allow proceeding with 0 assignments.
   const nonCavalryAvailable = playerPersonalities.filter(
@@ -467,23 +490,30 @@ export function BattleStrip({
 
       <div className="flex items-center justify-between gap-2">
         <span className="text-[8px] text-gray-500 italic flex-1 min-w-0">
-          Right-click your non-Cavalry personalities to assign attackers
+          {isAttacker
+            ? 'Right-click your non-Cavalry personalities to assign attackers'
+            : '⏳ Waiting for attacker to assign…'}
         </span>
         <div className="flex items-center gap-1.5 flex-shrink-0">
-          <button
-            onClick={beginResolution}
-            disabled={!canCommitInfantry}
-            className="text-[9px] font-bold px-2.5 py-0.5 rounded border border-red-600 text-red-200 bg-red-950/60 hover:bg-red-900 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
-            title="Lock in infantry assignments — defender may now assign"
-          >
-            Finish Assignments →
-          </button>
-          <button
-            onClick={onEndAttackPhase}
-            className="text-[9px] px-2 py-0.5 rounded border border-gray-700 text-gray-500 hover:text-gray-300 hover:border-gray-500 transition-colors"
-          >
-            No Battle
-          </button>
+          {isAttacker && (
+            <>
+              <button
+                onClick={beginResolution}
+                disabled={!canCommitInfantry}
+                className="text-[9px] font-bold px-2.5 py-0.5 rounded border border-red-600 text-red-200 bg-red-950/60 hover:bg-red-900 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                title="Lock in infantry assignments — defender may now assign"
+              >
+                Finish Assignments →
+              </button>
+              <button
+                onClick={onEndAttackPhase}
+                className="text-[9px] px-2 py-0.5 rounded border border-gray-700 text-gray-500 hover:text-gray-300 hover:border-gray-500 transition-colors"
+                title="Skip battle entirely — advance to Dynasty phase"
+              >
+                Skip to Dynasty
+              </button>
+            </>
+          )}
         </div>
       </div>
 

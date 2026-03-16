@@ -22,7 +22,7 @@ interface Props {
 
 export function GameCard({
   instance,
-  faceDown = !instance.faceUp,
+  faceDown: faceDownProp = !instance.faceUp,
   className = '',
   style,
   onClick,
@@ -34,6 +34,8 @@ export function GameCard({
   onModal,
 }: Props) {
   const { card } = instance;
+  // Treat null-card instances (opponent placeholders) as always face-down
+  const faceDown = faceDownProp || !card;
   const canPreview = !faceDown;
 
   const isTargeting   = useIsTargeting();
@@ -90,11 +92,11 @@ export function GameCard({
       onMouseLeave={handleMouseLeave}
       onContextMenu={handleContextMenu}
       title={
-        isTargetable
-          ? `Click to target: ${card.name}`
-          : faceDown
-            ? 'Face-down'
-            : `${card.name}${instance.bowed ? ' (bowed — double-click to unbow)' : ' — double-click to bow'}`
+        faceDown
+          ? 'Face-down'
+          : isTargetable
+            ? `Click to target: ${card!.name}`
+            : `${card!.name}${instance.bowed ? ' (bowed — double-click to unbow)' : ' — double-click to bow'}`
       }
     >
       {faceDown ? (
