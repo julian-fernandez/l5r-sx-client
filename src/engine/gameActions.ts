@@ -227,6 +227,10 @@ export function findReactionCandidates(
 
 /**
  * Returns true when a single ability timing window is currently open for the player.
+ *
+ * `hasPresence` — when false, Battle and Engage actions are illegal because the
+ * Rule of Presence (SX 5.4.c) requires the acting player to control at least one
+ * unit at the current battlefield.  Pass false when the player has no units there.
  */
 export function isTimingValid(
   timing: AbilityTiming,
@@ -235,11 +239,12 @@ export function isTimingValid(
   activePlayer: 'player' | 'opponent',
   priority: 'player' | 'opponent',
   battleWindowPriority: 'player' | 'opponent',
+  hasPresence = true,
 ): boolean {
   const myTurn = activePlayer === 'player';
   switch (timing) {
-    case 'Engage':  return turnPhase === 'attack' && battleStage === 'engage'       && battleWindowPriority === 'player';
-    case 'Battle':  return turnPhase === 'attack' && battleStage === 'battleWindow' && battleWindowPriority === 'player';
+    case 'Engage':   return turnPhase === 'attack' && battleStage === 'engage'       && battleWindowPriority === 'player' && hasPresence;
+    case 'Battle':   return turnPhase === 'attack' && battleStage === 'battleWindow' && battleWindowPriority === 'player' && hasPresence;
     case 'Limited':  return turnPhase === 'action' && myTurn && priority === 'player';
     case 'Open':     return turnPhase === 'action' && priority === 'player';
     case 'Reaction': return false; // Reactions are triggered by events, not played manually
@@ -254,6 +259,9 @@ export function isTimingValid(
  * Cards with no timing keyword default to Open (Action phase only).
  *
  * Key rule: Open and Limited abilities are NEVER playable during Battle/Engage windows.
+ *
+ * `hasPresence` — Rule of Presence (SX 5.4.c): the player must control at least one unit
+ * at the current battlefield to take Battle or Engage actions.  Pass false when they don't.
  */
 export function canPlayFromHand(
   card: NormalizedCard,
@@ -262,6 +270,7 @@ export function canPlayFromHand(
   activePlayer: 'player' | 'opponent',
   priority: 'player' | 'opponent',
   battleWindowPriority: 'player' | 'opponent',
+  hasPresence = true,
 ): boolean {
   // Attachments equip during any action-phase window the player holds priority
   if (['item', 'follower', 'spell'].includes(card.type)) {
@@ -269,7 +278,7 @@ export function canPlayFromHand(
   }
   if (card.type !== 'strategy') return false;
 
-  const args = [turnPhase, battleStage, activePlayer, priority, battleWindowPriority] as const;
+  const args = [turnPhase, battleStage, activePlayer, priority, battleWindowPriority, hasPresence] as const;
 
   // Try timing tags from keywords first (fast path)
   const kwTimings = getCardTimings(card);

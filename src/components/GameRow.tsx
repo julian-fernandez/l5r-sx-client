@@ -90,12 +90,15 @@ export function GameRow({
   const priority              = useGameStore(s => s.priority);
   const battleStage           = useGameStore(s => s.battleStage);
   const battleWindowPriority  = useGameStore(s => s.battleWindowPriority);
+  const currentBattlefield    = useGameStore(s => s.currentBattlefield);
+  const battleAssignments     = useGameStore(s => s.battleAssignments);
+  const defenderAssignments   = useGameStore(s => s.defenderAssignments);
 
-  const isEnd      = turnPhase === 'end';
   const isAction   = turnPhase === 'action';
   const isAttack   = turnPhase === 'attack';
   const HAND_LIMIT = 8;
-  const mustDiscard = isEnd && !isOpponent && player.hand.length > HAND_LIMIT;
+  // mustDiscard is now tied to the 'discard' sub-phase (per SX: hand limit checked at end of Dynasty)
+  const mustDiscard = turnPhase === 'discard' && !isOpponent && player.hand.length > HAND_LIMIT;
 
   // Cycling: whether this side is actively in cycle mode
   const isCycling = cyclingActive === target;
@@ -271,9 +274,16 @@ export function GameRow({
           onPlayCard={!isOpponent ? onPlayCard : undefined}
           onManualPlay={!isOpponent ? onManualPlay : undefined}
           onPlayRingPermanent={!isOpponent ? onPlayRingPermanent : undefined}
-          canPlay={(inst) => canPlayFromHand(
-            inst.card, turnPhase, battleStage, activePlayer, priority, battleWindowPriority,
-          )}
+          canPlay={(inst) => {
+            // Rule of Presence (SX 5.4.c): must have a unit at the current battlefield
+            // for Battle / Engage actions.
+            const playerAtBattlefield = currentBattlefield !== null && (
+              battleAssignments.some(a => a.provinceIndex === currentBattlefield) ||
+              defenderAssignments.some(a => a.provinceIndex === currentBattlefield &&
+                player.personalitiesHome.some(p => p.instanceId === a.instanceId))
+            );
+            return canPlayFromHand(inst.card, turnPhase, battleStage, activePlayer, priority, battleWindowPriority, playerAtBattlefield);
+          }}
           onKharmic={!isOpponent ? (instanceId) => useKharmic('hand', instanceId, target) : undefined}
           canKharmic={!isOpponent && (isAction || isAttack) && player.goldPool >= 2}
           pp={pp}

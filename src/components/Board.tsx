@@ -50,13 +50,10 @@ interface Props {
 
 const PHASE_LABELS: Record<TurnPhase, string> = {
   straighten: 'Straighten',
-  event:      'Event',
   action:     'Action',
   attack:     'Attack',
   dynasty:    'Dynasty',
-  discard:    'Discard',
-  draw:       'Draw',
-  end:        'End',
+  discard:    'Discard (hand limit)',
 };
 
 interface PreviewState {
@@ -115,10 +112,10 @@ export function Board({ player, opponent, activePlayer, onReset, multiplayerMode
     let timer: number;
 
     if (activePlayer === 'opponent') {
-      // Whole opponent turn auto-skips
+      // Whole opponent turn auto-skips (straighten, dynasty; discard is auto-resolved since
+      // the opponent's hand is unknown — we just advance through without discarding)
       if (
-        turnPhase === 'straighten' || turnPhase === 'event' ||
-        turnPhase === 'dynasty'    || turnPhase === 'discard' || turnPhase === 'end'
+        turnPhase === 'straighten' || turnPhase === 'dynasty' || turnPhase === 'discard'
       ) {
         timer = window.setTimeout(() => advancePhase(), DELAY);
       } else if (turnPhase === 'action') {
@@ -898,19 +895,17 @@ function NextPhaseButton({
 }: { phase: TurnPhase; activePlayer: 'player' | 'opponent'; onAdvance: () => void }) {
   const hand = useGameStore(s => s[activePlayer].hand);
 
-  // Action / Attack / Draw phases are governed by Pass buttons or auto-handled
-  if (phase === 'action' || phase === 'attack' || phase === 'draw') {
+  // Action / Attack phases are governed by Pass buttons or auto-handled
+  if (phase === 'action' || phase === 'attack') {
     return null;
   }
 
-  const mustDiscard = phase === 'end' && hand.length > HAND_LIMIT;
+  const mustDiscard = phase === 'discard' && hand.length > HAND_LIMIT;
   const surplus = hand.length - HAND_LIMIT;
 
   const label =
     phase === 'straighten' ? 'Flip Provinces →' :
-    phase === 'event'      ? '→ Action Phase' :
-    phase === 'dynasty'    ? 'Done Buying →' :
-    phase === 'discard'    ? 'Done Discarding  (draws 1) →' :
+    phase === 'dynasty'    ? 'End Turn  (draws 1) →' :
     mustDiscard             ? `Discard ${surplus} card${surplus > 1 ? 's' : ''} first` :
     'End Turn →';
 
@@ -921,11 +916,9 @@ function NextPhaseButton({
       title={
         phase === 'straighten'
           ? 'Flip all four of your provinces face-up. Events and Celestials resolve immediately.'
-          : phase === 'event'
-          ? 'Events have resolved — proceed to the Action Phase'
-          : phase === 'discard'
-          ? 'End Discard Phase — automatically draws 1 Fate card then goes to End Phase'
-          : phase === 'end' && mustDiscard
+          : phase === 'dynasty'
+          ? 'End your Dynasty Phase — automatically draws 1 Fate card, then starts opponent\'s turn'
+          : mustDiscard
           ? `Hand limit is ${HAND_LIMIT}. Click hand cards to discard.`
           : undefined
       }
@@ -933,7 +926,7 @@ function NextPhaseButton({
         'text-[11px] font-semibold px-3 py-1 rounded border transition-all flex-shrink-0',
         mustDiscard
           ? 'border-red-700 text-red-400 bg-red-950/40 cursor-not-allowed'
-          : phase === 'end'
+          : phase === 'discard'
           ? 'border-emerald-600 text-emerald-300 bg-emerald-950/50 hover:bg-emerald-900/70 cursor-pointer'
           : phase === 'straighten'
           ? 'border-amber-500 text-amber-300 bg-amber-950/50 hover:bg-amber-900/70 cursor-pointer animate-pulse'

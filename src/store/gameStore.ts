@@ -197,18 +197,22 @@ function resolveDuel(
 type GamePhase = 'setup' | 'lobby' | 'playing';
 
 /**
- * The eight phases of a Samurai Extended turn (in order).
- * Straighten → Event → Action → Attack → Dynasty → Discard → Draw → End
+ * The three phases of a Samurai Extended turn (per the official ruleset).
+ *   action   — Straighten + reveal provinces happen automatically at the start.
+ *              Players take Limited / Open actions alternating priority.
+ *   attack   — Active player may declare an Attack Phase.
+ *   dynasty  — Active player takes Dynasty actions, then ends turn.
+ *              End-of-turn draw happens automatically; if hand > 8 the player
+ *              enters the `discard` sub-phase to reduce to the hand limit.
+ *   discard  — Transient: player must discard down to 8 before the turn ends.
+ *   straighten — First-turn only; auto-advances to `action`.
  */
 export type TurnPhase =
   | 'straighten'
-  | 'event'
   | 'action'
   | 'attack'
   | 'dynasty'
-  | 'discard'
-  | 'draw'
-  | 'end';
+  | 'discard';
 
 
 interface GameStore {
@@ -1269,6 +1273,19 @@ export const useGameStore = create<GameStore>((set, get) => {
       }
     }
 
+    // Honor Requirement (per SX Comprehensive Rules): player's Family Honor must be
+    // ≥ the personality's Honor Requirement stat to recruit them.
+    if (!isHolding) {
+      const honorReq = Number(inst.card.honorRequirement);
+      if (!isNaN(honorReq) && honorReq > 0 && ps.familyHonor < honorReq) {
+        pushLog(
+          `Cannot recruit ${inst.card.name} — Honor Requirement ${honorReq} (you have ${ps.familyHonor})`,
+          'recruit', target,
+        );
+        return;
+      }
+    }
+
     const finalCost = calcEffectiveCost(inst.card, ps, { applyDiscount: discount });
 
     if (ps.goldPool < finalCost) return;
@@ -1423,72 +1440,86 @@ export const useGameStore = create<GameStore>((set, get) => {
     const HAND_LIMIT = 8;
 
     // Relay immediately so the opponent mirrors this phase advance.
-    // The hand-limit guard below is the only early-return that can block the action;
-    // in multiplayer both clients track the same active player hand, so the guard
-    // fires or not identically on both sides.
     relay({ type: 'advance-phase' });
 
-    // ── First-turn: reveal the active player's provinces ──────────────────────
+    // ── Helper: straighten incoming player, reveal provinces, start their Action Phase ──
+    const advanceToNextTurn = (updatedActivePs: PlayerState): void => {
+      const cur = get(); // fresh state after any mutations above
+      const newActive: 'player' | 'opponent' = cur.activePlayer === 'player' ? 'opponent' : 'player';
+      const incoming = cur[newActive];
+      const newTurnNumber = cur.turnNumber + 1;
+
+      // Straighten: unbow everything, reset per-turn flags, clear battle bonuses.
+      // Bamboo Harvesters cannot straighten before the incoming player's second turn.
+      // Global turn 2 is always the second player's FIRST turn, so BH stays bowed then.
+      const straightened: PlayerState = {
+        ...incoming,
+        strongholdBowed: false,
+        holdingsInPlay: incoming.holdingsInPlay.map(c => {
+          const isBH = /bamboo harvesters/i.test(c.card.name);
+          if (isBH && newTurnNumber === 2) return c;
+          return { ...c, bowed: false };
+        }),
+        personalitiesHome: incoming.personalitiesHome.map(c => ({ ...c, bowed: false, tempForceBonus: 0, tempChiBonus: 0, tempKeywords: [] })),
+        specialsInPlay:    incoming.specialsInPlay.map(c => ({ ...c, bowed: false })),
+        proclaimUsed: false,
+        goldPool: 0,
+        abilitiesUsed: [],
+        lobbyUsed: false,
+      };
+
+      // Per SX rules: all face-down province cards flip face-up at the start of every turn.
+      const { state: revealed, resolved } = applyRevealProvinces(straightened);
+
+      // ── Victory condition: Honor (≥ 40) at start of incoming player's turn ──
+      if (revealed.familyHonor >= 40) {
+        pushLog(
+          `${newActive === 'player' ? 'You begin' : 'Opponent begins'} their turn with ${revealed.familyHonor} Honor — Honor victory!`,
+          'honor', 'system',
+        );
+        set({ gameResult: { winner: newActive, reason: 'honor' }, [newActive]: revealed, [cur.activePlayer]: updatedActivePs });
+        return;
+      }
+
+      const resolvedMsg = resolved.length ? ` — ${resolved.join('; ')}` : '';
+      pushLog(
+        `Turn ${cur.turnNumber} ended — Turn ${newTurnNumber} begins (${newActive === 'player' ? 'Your' : "Opponent's"} turn). Provinces revealed${resolvedMsg}.`,
+        'phase', 'system',
+      );
+      set({
+        turnPhase: 'action',
+        activePlayer: newActive,
+        priority: newActive,
+        consecutivePasses: 0,
+        turnNumber: newTurnNumber,
+        [newActive]: revealed,
+        [cur.activePlayer]: updatedActivePs,
+      });
+    };
+
+    // ── STRAIGHTEN (first turn only): straighten + reveal → Action Phase ─────
     if (turnPhase === 'straighten') {
-      // Unbow everything for the active player — same logic as the End→next-turn
-      // transition, but applied here for the very first turn of the game (the
-      // only time turnPhase ever equals 'straighten'; subsequent turns skip
-      // straight to 'action' after the End Phase handles unbowing).
-      const ps = st[activePlayer];
       const unbowed: PlayerState = {
         ...ps,
         strongholdBowed: false,
-        holdingsInPlay:   ps.holdingsInPlay.map(c => ({ ...c, bowed: false })),
+        holdingsInPlay:    ps.holdingsInPlay.map(c => ({ ...c, bowed: false })),
         personalitiesHome: ps.personalitiesHome.map(c => ({ ...c, bowed: false, tempForceBonus: 0, tempChiBonus: 0, tempKeywords: [] })),
-        specialsInPlay:   ps.specialsInPlay.map(c => ({ ...c, bowed: false })),
+        specialsInPlay:    ps.specialsInPlay.map(c => ({ ...c, bowed: false })),
         goldPool: 0,
         abilitiesUsed: [],
         lobbyUsed: false,
       };
       const { state: revealed, resolved } = applyRevealProvinces(unbowed);
       const who = activePlayer === 'player' ? 'You' : 'Opponent';
-      const resolvedMsg = resolved.length
-        ? `: ${resolved.join('; ')}`
-        : '';
-      pushLog(`${who} flipped provinces${resolvedMsg}`, 'phase', 'system');
-      set({ [activePlayer]: revealed, turnPhase: 'event' });
+      const resolvedMsg = resolved.length ? `: ${resolved.join('; ')}` : '';
+      pushLog(`${who} flipped provinces${resolvedMsg} — Action Phase begins`, 'phase', 'system');
+      set({ [activePlayer]: revealed, turnPhase: 'action', priority: activePlayer });
       return;
     }
 
-    // ── Event Phase: no interactive events yet — just continue ────────────────
-    if (turnPhase === 'event') {
-      pushLog('Event Phase passed → Action Phase', 'phase', 'system');
-      set({ turnPhase: 'action', priority: activePlayer });
-      return;
-    }
-
+    // ── DYNASTY: end-of-turn draw, hand limit check, then advance turn ────────
     if (turnPhase === 'dynasty') {
-      pushLog('Dynasty Phase ended → Discard Phase', 'phase', 'system');
-      set({ turnPhase: 'discard' });
-      return;
-    }
-
-    if (turnPhase === 'discard') {
-      if (ps.fateDeck.length > 0) {
-        const [top, ...rest] = ps.fateDeck;
-        const drawn: CardInstance = { ...top, location: 'hand', faceUp: activePlayer !== 'opponent' };
-        pushLog(
-          `${activePlayer === 'player' ? 'You' : 'Opponent'} drew ${activePlayer === 'player' ? top.card.name : 'a card'} (end-of-turn draw)`,
-          'draw', activePlayer,
-        );
-        set({ turnPhase: 'end', [activePlayer]: { ...ps, fateDeck: rest, hand: [...ps.hand, drawn] } });
-      } else {
-        set({ turnPhase: 'end' });
-      }
-      pushLog('Discard Phase ended → End Phase', 'phase', 'system');
-      return;
-    }
-
-    if (turnPhase === 'end') {
-      if (ps.hand.length > HAND_LIMIT) return;
-
-      // ── Dishonor defeat: checked at the END of the active player's turn ──
-      // Only the active player's honor is evaluated here (it's their turn ending).
+      // Dishonor defeat: checked at the end of the active player's dynasty phase.
       if (ps.familyHonor <= -20) {
         const winner: 'player' | 'opponent' = activePlayer === 'player' ? 'opponent' : 'player';
         pushLog(
@@ -1499,58 +1530,34 @@ export const useGameStore = create<GameStore>((set, get) => {
         return;
       }
 
-      const newActive: 'player' | 'opponent' = activePlayer === 'player' ? 'opponent' : 'player';
-      const incoming = st[newActive];
-      const newTurnNumber = st.turnNumber + 1;
-
-      // Straighten: unbow everything, reset per-turn flags, clear battle bonuses
-      // Bamboo Harvesters cannot straighten before the incoming player's second turn.
-      // Global turn 2 is always the second player's FIRST turn (regardless of who goes first/second),
-      // so BH stays bowed whenever newTurnNumber === 2.
-      const straightened: PlayerState = {
-        ...incoming,
-        strongholdBowed: false,
-        holdingsInPlay: incoming.holdingsInPlay.map(c => {
-          const isBH = /bamboo harvesters/i.test(c.card.name);
-          if (isBH && newTurnNumber === 2) return c; // stays bowed — first turn for this player
-          return { ...c, bowed: false };
-        }),
-        personalitiesHome:  incoming.personalitiesHome.map(c => ({ ...c, bowed: false, tempForceBonus: 0, tempChiBonus: 0, tempKeywords: [] })),
-        specialsInPlay:     incoming.specialsInPlay.map(c => ({ ...c, bowed: false })),
-        proclaimUsed: false,
-        goldPool: 0,
-        abilitiesUsed: [],
-        lobbyUsed: false,
-      };
-
-      // Per SX rules: all face-down province cards flip face-up at the start of every turn.
-      // Events and Celestials resolve immediately (same as the first-turn flip).
-      const { state: revealed, resolved } = applyRevealProvinces(straightened);
-
-      // ── Victory condition: Honor (≥ 40) at start of incoming player's turn ──
-      if (revealed.familyHonor >= 40) {
+      // End-of-turn draw (per SX 5.3.d.2).
+      let updatedPs = ps;
+      if (ps.fateDeck.length > 0) {
+        const [top, ...rest] = ps.fateDeck;
+        const drawn: CardInstance = { ...top, location: 'hand', faceUp: activePlayer !== 'opponent' };
         pushLog(
-          `${newActive === 'player' ? 'You begin' : 'Opponent begins'} their turn with ${revealed.familyHonor} Honor — Honor victory!`,
-          'honor', 'system',
+          `${activePlayer === 'player' ? 'You' : 'Opponent'} drew ${activePlayer === 'player' ? top.card.name : 'a card'} (end-of-turn draw)`,
+          'draw', activePlayer,
         );
-        set({ gameResult: { winner: newActive, reason: 'honor' }, [newActive]: revealed });
+        updatedPs = { ...ps, fateDeck: rest, hand: [...ps.hand, drawn] };
+      }
+
+      // Hand limit: if over, enter discard sub-phase (per SX 5.3.d.3).
+      if (updatedPs.hand.length > HAND_LIMIT) {
+        pushLog(`Hand limit exceeded (${updatedPs.hand.length}/${HAND_LIMIT}) — discard before ending your turn`, 'discard', activePlayer);
+        set({ turnPhase: 'discard', [activePlayer]: updatedPs });
         return;
       }
 
-      const resolvedMsg = resolved.length ? ` — ${resolved.join('; ')}` : '';
-      pushLog(
-        `Turn ${st.turnNumber} ended — Turn ${st.turnNumber + 1} begins (${newActive === 'player' ? 'Your' : "Opponent's"} turn). Provinces revealed${resolvedMsg}.`,
-        'phase', 'system',
-      );
-      set({
-        // Go to Event phase so the player can see what was revealed before acting
-        turnPhase: 'event',
-        activePlayer: newActive,
-        priority: newActive,
-        consecutivePasses: 0,
-        turnNumber: st.turnNumber + 1,
-        [newActive]: revealed,
-      });
+      advanceToNextTurn(updatedPs);
+      return;
+    }
+
+    // ── DISCARD: player is discarding to hand limit; advance when ready ────────
+    if (turnPhase === 'discard') {
+      // Block if still over limit.
+      if (ps.hand.length > HAND_LIMIT) return;
+      advanceToNextTurn(ps);
       return;
     }
   },
@@ -2422,10 +2429,19 @@ export const useGameStore = create<GameStore>((set, get) => {
           };
         }
 
-        const remainingAssignments  = battleAssignments.filter(a => a.provinceIndex !== provinceIndex);
-        const remainingDefenders    = defenderAssignments.filter(d => d.provinceIndex !== provinceIndex);
+        const remainingAssignments = battleAssignments.filter(a => a.provinceIndex !== provinceIndex);
+
+        // Per SX 5.4.f.18: defending units only return home after the LAST battle of the
+        // Attack Phase (or a standalone battle). If defenders won this battle, their
+        // personalities survived — they stay "at their battlefield" until the phase ends,
+        // so we keep their assignments. If attackers won or it was a tie, defenders are
+        // dead and their orphaned assignment entries can be cleared.
+        const remainingDefenders = (attackerWins || isTie)
+          ? defenderAssignments.filter(d => d.provinceIndex !== provinceIndex)
+          : defenderAssignments; // defenders survived → stay at Province until Attack Phase ends
 
         if (remainingAssignments.length === 0) {
+          // Last battlefield resolved — surviving defenders now return home (per 5.4.f.18)
           pushLog('All battlefields resolved → Dynasty Phase', 'phase', 'system');
           set({
             turnPhase: 'dynasty', battleStage: null,
