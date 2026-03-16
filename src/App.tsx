@@ -257,7 +257,6 @@ function applyRelayedAction(action: import('../server/src/types').SerializedActi
         break;
       case 'recruit':
         store.recruitFromProvince(action.provinceIndex, 'opponent', {
-          discount: false,
           proclaim: action.proclaim,
         });
         break;

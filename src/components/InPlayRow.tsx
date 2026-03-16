@@ -97,6 +97,7 @@ export function InPlayRow({
   const dishonorPersonality   = useGameStore(s => s.dishonorPersonality);
   const rehonorPersonality    = useGameStore(s => s.rehonorPersonality);
   const destroyCard           = useGameStore(s => s.destroyCard);
+  const seppukuPersonality    = useGameStore(s => s.seppukuPersonality);
   const discardFromPlay       = useGameStore(s => s.discardFromPlay);
   const returnToHand          = useGameStore(s => s.returnToHand);
   const moveHome              = useGameStore(s => s.moveHome);
@@ -369,6 +370,18 @@ export function InPlayRow({
           : dishonorPersonality(inst.instanceId, target),
         variant: inst.dishonored ? undefined : 'danger',
       });
+
+      // Seppuku Reaction: Samurai / Courtier / Shugenja only
+      const instKws = inst.card.keywords.map(k => k.toLowerCase().trim());
+      const canSeppuku = ['samurai', 'courtier', 'shugenja'].some(t => instKws.includes(t));
+      if (canSeppuku) {
+        items.push({
+          label: '⚔ Commit Seppuku',
+          sublabel: '→ Honorably Dead, −1 honor (Seppuku Reaction)',
+          onClick: () => seppukuPersonality(inst.instanceId, target),
+          variant: 'danger',
+        });
+      }
 
       items.push({ separator: true });
 

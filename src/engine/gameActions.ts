@@ -572,30 +572,68 @@ export function calcEffectiveChi(p: CardInstance): number {
 }
 
 /**
- * Compute the effective gold cost for a card.
- *
- * Applies (in order):
- *  1. Clan discount: −2g when `applyDiscount` is true and the card's clan
- *     matches the player's stronghold clan. This is a player-chosen action,
- *     not auto-applied — pass `applyDiscount: true` only when the player
- *     explicitly triggers it.
- *
- * Returns a value ≥ 0. Add future cost-reduction effects here so every
- * code path that pays for a card uses a single source of truth.
- *
- * @param applyDiscount  Whether to apply the 2g same-clan discount (optional, default false).
+ * Compute the effective gold cost for a card played from hand (Fate cards).
+ * No alignment or HR modifiers apply here — just the raw cost.
  */
 export function calcEffectiveCost(
   card: NormalizedCard,
-  player: Pick<PlayerState, 'stronghold'>,
-  { applyDiscount = false }: { applyDiscount?: boolean } = {},
+  _player: Pick<PlayerState, 'stronghold'>,
+  _opts: { applyDiscount?: boolean } = {},
 ): number {
+  return Math.max(0, Number(card.cost) || 0);
+}
+
+/**
+ * Compute the gold cost to recruit a card from a province (Dynasty recruit).
+ *
+ * Returns the gold cost, or `null` if the recruit is completely blocked.
+ *
+ * Per SX 2.6.9.b rules for personalities:
+ *   Same clan  + HR ≤ FH  →  cost − 2  (Repeatable Recruit discount)
+ *   Same clan  + HR > FH  →  cost       (no discount, not blocked)
+ *   Diff clan  + HR ≤ FH  →  cost + 2
+ *   Diff clan  + HR > FH  →  BLOCKED (null)
+ *   Unaligned  + HR ≤ FH  →  cost
+ *   Unaligned  + HR > FH  →  BLOCKED (null)
+ *
+ * Proclaim (same clan only):
+ *   HR ≤ FH  →  cost      (no discount; gain PH honor)
+ *   HR > FH  →  cost + 2  (surcharge;  gain PH honor)
+ *
+ * Holdings: always base cost regardless of alignment or HR.
+ */
+export function calcRecruitCost(
+  card: NormalizedCard,
+  player: Pick<PlayerState, 'stronghold' | 'familyHonor'>,
+  { isProclaim = false }: { isProclaim?: boolean } = {},
+): number | null {
   const base = Math.max(0, Number(card.cost) || 0);
-  const cardClan   = card.clan?.toLowerCase() ?? '';
-  const playerClan = (player.stronghold?.clan ?? '').toLowerCase();
-  const canDiscount = Boolean(cardClan && playerClan && cardClan === playerClan);
-  const discount    = applyDiscount && canDiscount ? 2 : 0;
-  return Math.max(0, base - discount);
+
+  if (card.type === 'holding') return base;
+
+  const honorReq = Number(card.honorRequirement);
+  const meetsHR  = isNaN(honorReq) || honorReq <= 0 || player.familyHonor >= honorReq;
+
+  const cardClan   = card.clan?.toLowerCase().trim() ?? '';
+  const playerClan = (player.stronghold?.clan ?? '').toLowerCase().trim();
+  const isUnaligned = !cardClan;
+  const isSameClan  = !!cardClan && !!playerClan && cardClan === playerClan;
+
+  if (isProclaim) {
+    // Proclaim is always same-clan; HR affects cost but not legality
+    return meetsHR ? base : Math.max(0, base + 2);
+  }
+
+  if (isSameClan) {
+    return meetsHR ? Math.max(0, base - 2) : base;
+  }
+
+  if (isUnaligned) {
+    return meetsHR ? base : null;
+  }
+
+  // Different clan
+  return meetsHR ? base + 2 : null;
 }
 
 /**

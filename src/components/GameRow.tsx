@@ -16,7 +16,7 @@ import { useState } from 'react';
 import type { BattleAssignment, CardInstance, NormalizedCard, PlayerState, Province } from '../types/cards';
 import { BATTLEFIELD_STYLES } from '../types/cards';
 import { useGameStore } from '../store/gameStore';
-import { canPlayFromHand } from '../engine/gameActions';
+import { canPlayFromHand, calcRecruitCost } from '../engine/gameActions';
 import { CardImage } from './CardImage';
 import { GameCard } from './GameCard';
 import { ContextMenu, type ContextMenuEntry } from './ContextMenu';
@@ -79,6 +79,7 @@ export function GameRow({
   const useKharmic            = useGameStore(s => s.useKharmic);
   const flipProvinceCard      = useGameStore(s => s.flipProvinceCard);
   const breakProvince         = useGameStore(s => s.breakProvince);
+  const overlayPersonality    = useGameStore(s => s.overlayPersonality);
   const turnPhase             = useGameStore(s => s.turnPhase);
   const turnNumber            = useGameStore(s => s.turnNumber);
   const cyclingActive         = useGameStore(s => s.cyclingActive);
@@ -154,45 +155,72 @@ export function GameRow({
     }
 
     // ── Recruit (always available when face-up and has a personality/holding) ─
-    if (cardData && province.faceUp && !province.broken) {
-      const baseCost   = Math.max(0, Number(cardData.cost) || 0);
-      const playerClan = player.stronghold?.clan?.toLowerCase() ?? '';
-      const cardClan   = cardData.clan?.toLowerCase() ?? '';
-      const isSameClan = !!playerClan && !!cardClan && playerClan === cardClan;
+    if (cardData && province.faceUp && !province.broken && cardData.type !== 'region') {
+      const recruitCost  = calcRecruitCost(cardData, player);
       const isPersonality = cardData.type === 'personality';
-      const canAfford  = (c: number) => player.goldPool >= c;
+      const playerClan   = player.stronghold?.clan?.toLowerCase() ?? '';
+      const cardClan     = cardData.clan?.toLowerCase() ?? '';
+      const isSameClan   = !!playerClan && !!cardClan && playerClan === cardClan;
 
       if (items.length > 0) items.push({ separator: true });
 
-      if (isSameClan && isPersonality) {
-        const discountCost = Math.max(0, baseCost - 2);
-        const ph           = Number(cardData.personalHonor) || 0;
-        items.push({
-          label: 'Recruit with Clan Discount',
-          sublabel: `${discountCost}g  (−2, no honor)`,
-          onClick: () => recruitFromProvince(province.index, target, { discount: true }),
-          disabled: !canAfford(discountCost),
-          variant: 'primary',
-        });
-        items.push({
-          label: 'Recruit + Proclaim',
-          sublabel: `${baseCost}g  +${ph} Honor`,
-          onClick: () => recruitFromProvince(province.index, target, { proclaim: true }),
-          disabled: !canAfford(baseCost) || player.proclaimUsed,
-          variant: 'primary',
-        });
-        items.push({
-          label: 'Recruit (standard)',
-          sublabel: `${baseCost}g`,
-          onClick: () => recruitFromProvince(province.index, target),
-          disabled: !canAfford(baseCost),
-        });
-      } else if (cardData.type !== 'region') {
+      if (recruitCost === null) {
+        // Blocked (wrong alignment + HR not met)
+        const honorReq = Number(cardData.honorRequirement) || 0;
         items.push({
           label: 'Recruit',
-          sublabel: `${baseCost}g`,
+          sublabel: `Blocked — HR ${honorReq} required (you have ${player.familyHonor})`,
+          onClick: () => {},
+          disabled: true,
+        });
+      } else {
+        items.push({
+          label: 'Recruit',
+          sublabel: `${recruitCost}g`,
           onClick: () => recruitFromProvince(province.index, target),
-          disabled: !canAfford(baseCost),
+          disabled: player.goldPool < recruitCost,
+          variant: 'primary',
+        });
+
+        // Proclaim: same-clan personalities only, once per turn
+        if (isPersonality && isSameClan) {
+          const proclaimCost = calcRecruitCost(cardData, player, { isProclaim: true }) ?? recruitCost;
+          const ph = Number(cardData.personalHonor) || 0;
+          items.push({
+            label: 'Recruit + Proclaim',
+            sublabel: `${proclaimCost}g  +${ph} Honor`,
+            onClick: () => recruitFromProvince(province.index, target, { proclaim: true }),
+            disabled: player.goldPool < proclaimCost || player.proclaimUsed,
+            variant: 'primary',
+          });
+        }
+      }
+    }
+
+    // ── Overlay / Experienced (SX 2.6.9.c) ────────────────────────────────
+    if (cardData && province.faceUp && !province.broken && cardData.type === 'personality') {
+      // Find "Soul of [Name]" keyword on the province personality
+      const soulOfKw = cardData.keywords.find(k => /^soul of /i.test(k.trim()));
+      // Also match by name convention: strip " - Experienced [N]" suffix
+      const baseName = cardData.name.replace(/\s*[-–]\s*experienced(\s+\d+)?$/i, '').toLowerCase().trim();
+
+      const overlayTarget = player.personalitiesHome.find(p => {
+        if (soulOfKw) {
+          const soulName = soulOfKw.replace(/^soul of /i, '').toLowerCase().trim();
+          return p.card.name.toLowerCase().trim() === soulName;
+        }
+        // Fallback: base card has the same root name and lower/no experience level
+        return p.card.name.toLowerCase().trim() === baseName && p.card.name !== cardData.name;
+      });
+
+      if (overlayTarget) {
+        const overlayCost = calcRecruitCost(cardData, player);
+        if (items.length > 0) items.push({ separator: true });
+        items.push({
+          label: `Overlay → ${overlayTarget.card.name}`,
+          sublabel: overlayCost !== null ? `${overlayCost}g — transfers state` : 'Blocked (clan/HR)',
+          onClick: () => overlayPersonality(province.index, overlayTarget.instanceId, target),
+          disabled: overlayCost === null || player.goldPool < overlayCost,
           variant: 'primary',
         });
       }

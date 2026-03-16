@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import type { BattleAssignment, CardInstance, LogCategory, LogEntry, NormalizedCard, ParsedDeck, PlayerState, Province, TargetFilter, ValidTarget, ZoneId } from '../types/cards';
-import { calcUnitForce, calcFollowerForce, createInstance, expandDeck, shuffle, isConquerorUnit, calcEffectiveChi, hasRepeatableAbility, calcEffectiveCost, calcProvinceStrength, findReactionCandidates, getValidTargets } from '../engine/gameActions';
+import { calcUnitForce, calcFollowerForce, createInstance, expandDeck, shuffle, isConquerorUnit, calcEffectiveChi, hasRepeatableAbility, calcRecruitCost, calcProvinceStrength, findReactionCandidates, getValidTargets } from '../engine/gameActions';
 import type { BattleKeywordType, TriggerType, TriggerContext, ReactionCandidate } from '../engine/gameActions';
 import { parseDeck } from '../engine/deckParser';
 import { applyMidGameState, UNICORN_TEST_DECK, PHOENIX_TEST_DECK } from '../engine/testFixtures';
@@ -363,15 +363,16 @@ interface GameStore {
    * Spend gold from the pool to recruit the face-up card in the given province.
    * The province is immediately refilled face-down from the top of the dynasty deck.
    *
-   * Options (only valid for same-clan personalities):
-   *  - `discount`: apply the 2-gold Clan Discount (mutually exclusive with proclaim)
-   *  - `proclaim`: pay 2 extra gold; add the personality's Personal Honor to Family Honor
-   *                (may only be used once per turn)
+   * Options:
+   *  - `proclaim`: gain the personality's Personal Honor when recruited
+   *                (may only be used once per turn; same-clan only)
+   *
+   * Costs are computed automatically per alignment + HR rules (SX 2.6.9.b).
    */
   recruitFromProvince: (
     provinceIndex: number,
     target: 'player' | 'opponent',
-    options?: { discount?: boolean; proclaim?: boolean },
+    options?: { proclaim?: boolean },
   ) => void;
 
   // ── Phase advancement ────────────────────────────────────────────────────────
@@ -389,6 +390,16 @@ interface GameStore {
   flipProvinceCard: (provinceIndex: number, target: 'player' | 'opponent') => void;
   /** Manually mark a province as broken (destroyed). */
   breakProvince: (provinceIndex: number, target: 'player' | 'opponent') => void;
+  /**
+   * Overlay / Experienced (SX 2.6.9.c): Replace an in-play personality with the
+   * Experienced version in a province. Transfers attachments, bowed state, tokens,
+   * and dishonored status. The base personality goes to dynasty discard.
+   */
+  overlayPersonality: (
+    provinceIndex: number,
+    inPlayInstanceId: string,
+    target: 'player' | 'opponent',
+  ) => void;
   /** During End Phase: discard a hand card to meet the 8-card hand limit. */
   discardHandCard: (instanceId: string, target: 'player' | 'opponent') => void;
 
@@ -630,6 +641,12 @@ interface GameStore {
    * - Holding / Special: routed to dynastyDiscard.
    */
   destroyCard: (instanceId: string, target?: 'player' | 'opponent') => void;
+  /**
+   * Seppuku Reaction (SX 2.6.7.a): A Samurai/Courtier/Shugenja personality commits seppuku.
+   * They leave play honorably but the controller loses only 1 Family Honor instead of the
+   * full PH that would normally be lost via dishonorable death.
+   */
+  seppukuPersonality: (instanceId: string, target?: 'player' | 'opponent') => void;
   /**
    * Discard a card from play WITHOUT it being "killed in battle."
    * - Personality: goes to dynastyDiscard (not the Dead piles); no honor loss.
@@ -1228,7 +1245,7 @@ export const useGameStore = create<GameStore>((set, get) => {
   },
 
   recruitFromProvince: (provinceIndex, target, options = {}) => {
-    const { discount = false, proclaim = false } = options;
+    const { proclaim = false } = options;
     const state = get();
     const ps  = state[target];
     const province = ps.provinces[provinceIndex];
@@ -1273,20 +1290,19 @@ export const useGameStore = create<GameStore>((set, get) => {
       }
     }
 
-    // Honor Requirement (per SX Comprehensive Rules): player's Family Honor must be
-    // ≥ the personality's Honor Requirement stat to recruit them.
-    if (!isHolding) {
-      const honorReq = Number(inst.card.honorRequirement);
-      if (!isNaN(honorReq) && honorReq > 0 && ps.familyHonor < honorReq) {
-        pushLog(
-          `Cannot recruit ${inst.card.name} — Honor Requirement ${honorReq} (you have ${ps.familyHonor})`,
-          'recruit', target,
-        );
-        return;
-      }
-    }
+    // Compute cost using alignment + HR rules (SX 2.6.9.b)
+    const finalCost = calcRecruitCost(inst.card, ps, { isProclaim: proclaim });
 
-    const finalCost = calcEffectiveCost(inst.card, ps, { applyDiscount: discount });
+    if (finalCost === null) {
+      // Blocked: wrong clan + HR not met, or unaligned + HR not met
+      const honorReq = Number(inst.card.honorRequirement);
+      const cardClan = inst.card.clan ?? 'unaligned';
+      pushLog(
+        `Cannot recruit ${inst.card.name} — ${cardClan} clan with Honor Requirement ${honorReq} (you have ${ps.familyHonor})`,
+        'recruit', target,
+      );
+      return;
+    }
 
     if (ps.goldPool < finalCost) return;
 
@@ -1315,8 +1331,6 @@ export const useGameStore = create<GameStore>((set, get) => {
 
     if (proclaim) {
       pushLog(`${who} proclaimed ${inst.card.name} for ${finalCost}g (+${phGain} honor)`, 'recruit', target);
-    } else if (discount) {
-      pushLog(`${who} recruited ${inst.card.name} with clan discount for ${finalCost}g`, 'recruit', target);
     } else {
       pushLog(`${who} recruited ${inst.card.name} for ${finalCost}g`, 'recruit', target);
     }
@@ -1607,12 +1621,94 @@ export const useGameStore = create<GameStore>((set, get) => {
   breakProvince: (provinceIndex, target) => {
     const ps = get()[target];
     pushLog(`${target === 'player' ? 'Your' : "Opponent's"} province ${provinceIndex + 1} is broken`, 'other', target);
+
+    // Discard any Fortification holdings attached to this province (SX rules)
+    const fortifications = ps.holdingsInPlay.filter(
+      h => h.fortificationProvince === provinceIndex,
+    );
+    const holdingsInPlay = ps.holdingsInPlay.filter(
+      h => h.fortificationProvince !== provinceIndex,
+    );
+    const dynastyDiscard = [
+      ...ps.dynastyDiscard,
+      ...fortifications.map(f => ({ ...f, location: 'dynastyDiscard' as ZoneId })),
+    ];
+    if (fortifications.length > 0) {
+      pushLog(
+        `${fortifications.map(f => f.card.name).join(', ')} discarded — Fortification province broken`,
+        'discard', target,
+      );
+    }
+
     set({
       [target]: {
         ...ps,
+        holdingsInPlay,
+        dynastyDiscard,
         provinces: ps.provinces.map((p, i) =>
           i === provinceIndex ? { ...p, broken: true, card: null, faceUp: false } : p,
         ),
+      },
+    });
+  },
+
+  overlayPersonality: (provinceIndex, inPlayInstanceId, target) => {
+    const ps = get()[target];
+    const province = ps.provinces[provinceIndex];
+    if (!province?.card || !province.faceUp) return;
+
+    const provinceInst = province.card;
+    const expCard = provinceInst.card;
+    if (expCard.type !== 'personality') return;
+
+    const baseInst = ps.personalitiesHome.find(p => p.instanceId === inPlayInstanceId);
+    if (!baseInst) return;
+
+    const cost = calcRecruitCost(expCard, ps);
+    if (cost === null || ps.goldPool < cost) return;
+
+    const who = target === 'player' ? 'You' : 'Opponent';
+    pushLog(
+      `${who} overlaid ${expCard.name} over ${baseInst.card.name} for ${cost}g`,
+      'recruit', target,
+    );
+
+    // New personality inherits the base card's runtime state
+    const overlaid: CardInstance = {
+      ...provinceInst,
+      location: 'personalitiesHome' as ZoneId,
+      bowed:       baseInst.bowed,
+      dishonored:  baseInst.dishonored,
+      tokens:      [...baseInst.tokens],
+      attachments: [...baseInst.attachments],
+      fateTokens:  baseInst.fateTokens,
+      honorTokens: baseInst.honorTokens,
+      tempForceBonus: baseInst.tempForceBonus,
+      tempChiBonus:   baseInst.tempChiBonus,
+      tempKeywords:   [...baseInst.tempKeywords],
+    };
+
+    // Refill province from dynasty deck (face-down)
+    const [nextCard = null, ...restDynasty] = ps.dynastyDeck;
+    const newProvinceCard: CardInstance | null = nextCard
+      ? { ...nextCard, location: `province${provinceIndex}` as ZoneId, faceUp: false, bowed: false }
+      : null;
+
+    set({
+      [target]: {
+        ...ps,
+        goldPool:    0,
+        dynastyDeck: restDynasty,
+        provinces: ps.provinces.map((p, i) =>
+          i === provinceIndex ? { ...p, card: newProvinceCard, faceUp: false } : p,
+        ),
+        personalitiesHome: ps.personalitiesHome.map(p =>
+          p.instanceId === inPlayInstanceId ? overlaid : p,
+        ),
+        dynastyDiscard: [
+          ...ps.dynastyDiscard,
+          { ...baseInst, location: 'dynastyDiscard' as ZoneId, attachments: [] },
+        ],
       },
     });
   },
@@ -3015,6 +3111,39 @@ export const useGameStore = create<GameStore>((set, get) => {
         },
       });
     }
+  },
+
+  seppukuPersonality: (instanceId, target = 'player') => {
+    const ps = get()[target];
+    const who = target === 'player' ? 'Your' : "Opponent's";
+    const personality = ps.personalitiesHome.find(p => p.instanceId === instanceId);
+    if (!personality) return;
+
+    const kws = personality.card.keywords.map(k => k.toLowerCase().trim());
+    const eligible = ['samurai', 'courtier', 'shugenja'].some(t => kws.includes(t));
+    if (!eligible) {
+      pushLog(`${who} ${personality.card.name} cannot commit seppuku — not Samurai/Courtier/Shugenja`, 'other', target);
+      return;
+    }
+
+    const attachFateDiscard: CardInstance[] = personality.attachments
+      .filter(a => ['item', 'follower', 'spell'].includes(a.card.type))
+      .map(a => ({ ...a, location: 'fateDiscard' as import('../types/cards').ZoneId }));
+
+    pushLog(
+      `${who} ${personality.card.name} commits seppuku → Honorably Dead (−1 honor)`,
+      'battle', target,
+    );
+    set({
+      [target]: {
+        ...ps,
+        familyHonor: ps.familyHonor - 1,
+        personalitiesHome: ps.personalitiesHome.filter(p => p.instanceId !== instanceId),
+        honorablyDead: [...ps.honorablyDead, { ...personality, location: 'honorablyDead' as import('../types/cards').ZoneId, attachments: [] }],
+        fateDiscard: [...ps.fateDiscard, ...attachFateDiscard],
+      },
+    });
+    get().checkVictoryConditions();
   },
 
   discardFromPlay: (instanceId, target = 'player') => {
