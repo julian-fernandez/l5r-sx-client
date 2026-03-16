@@ -183,5 +183,12 @@ export type SerializedAction =
   | { type: 'remove-keyword'; instanceId: string; keyword: string }
   | { type: 'bring-into-play'; instanceId: string; attachTargetId?: string }
   | { type: 'rehonor-personality'; instanceId: string }
+  | { type: 'give-chi-bonus'; instanceId: string; amount: number }
+  | { type: 'return-to-hand'; instanceId: string }
+  | { type: 'produce-gold'; amount: number }
+  | { type: 'duel-accept' }
+  | { type: 'duel-refuse' }
+  | { type: 'duel-focus-card'; instanceId: string; focusValue: number; faceDown: boolean; cardName: string }
+  | { type: 'duel-pass-focus' }
   | { type: 'sync-state' } // client asks server to snapshot their state
   ;

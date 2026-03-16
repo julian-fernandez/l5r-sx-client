@@ -220,7 +220,7 @@ export function BattleStrip({
                 className="text-[9px] font-bold px-2.5 py-0.5 rounded border border-rose-600 text-rose-200 bg-rose-950/60 hover:bg-rose-900 transition-colors"
                 title="Lock in defender assignments — Cavalry phase begins"
               >
-                Commit Defenders →
+                Finish Assignments →
               </button>
             )}
             <button
@@ -279,8 +279,8 @@ export function BattleStrip({
                 onClick={commitCavalry}
                 className="text-[9px] font-bold px-2.5 py-0.5 rounded border border-yellow-600 text-yellow-200 bg-yellow-950/60 hover:bg-yellow-900 transition-colors"
                 title="Lock in Cavalry assignments — proceed to battle resolution"
-              >
-                {hasCavAvailable ? 'Commit Cavalry →' : 'Skip →'}
+                >
+                  {hasCavAvailable ? 'Finish Assignments →' : 'Skip →'}
               </button>
             )}
             <button
@@ -341,8 +341,8 @@ export function BattleStrip({
                 onClick={commitDefenderCavalry}
                 className="text-[9px] font-bold px-2.5 py-0.5 rounded border border-rose-600 text-rose-200 bg-rose-950/60 hover:bg-rose-900 transition-colors"
                 title="Lock in Cavalry defenders — proceed to battle resolution"
-              >
-                {defCavAvailable ? 'Commit Cav. →' : 'Skip →'}
+                >
+                  {defCavAvailable ? 'Finish Assignments →' : 'Skip →'}
               </button>
             )}
             <button
@@ -385,9 +385,7 @@ export function BattleStrip({
       <div className="flex items-center justify-between gap-2">
         <span className="text-[8px] text-gray-500 italic flex-1 min-w-0">
           {battleStage === 'assigning'
-            ? nonCavalryAvailable.length === 0
-              ? 'No non-Cavalry personalities to assign — skip to Cavalry phase'
-              : 'Right-click your non-Cavalry personalities to assign attackers'
+            ? 'Right-click your non-Cavalry personalities to assign attackers'
             : 'Choose which battlefield to resolve first'}
         </span>
         <div className="flex items-center gap-1.5 flex-shrink-0">
@@ -396,15 +394,9 @@ export function BattleStrip({
               onClick={beginResolution}
               disabled={!canCommitInfantry}
               className="text-[9px] font-bold px-2.5 py-0.5 rounded border border-red-600 text-red-200 bg-red-950/60 hover:bg-red-900 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
-              title={
-                nonCavalryAvailable.length === 0
-                  ? 'No infantry to assign — skip to Cavalry phase'
-                  : 'Lock in infantry assignments — defender may now assign'
-              }
+              title="Lock in infantry assignments — defender may now assign"
             >
-              {nonCavalryAvailable.length === 0 && battleAssignments.length === 0
-                ? 'Skip to Cavalry →'
-                : 'Commit Infantry →'}
+              Finish Assignments →
             </button>
           )}
           <button

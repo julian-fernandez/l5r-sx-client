@@ -20,6 +20,14 @@ let _suppressRelay = false;
 
 let _targetCallback: ((target: ValidTarget) => void) | null = null;
 
+// ─── Module-level duel resolve callback ───────────────────────────────────────
+// Set by initiateDuel() with the triggering ability's effect function.
+// resolveDuel() calls it once Strike is determined, then nulls it.
+// The callback is responsible for applying the card-specific win/loss effects
+// (bow, dishonor, kill, draw, etc.) and any trait bonuses the winner may have.
+
+let _duelResolveCallback: ((result: import('../types/cards').DuelResult) => void) | null = null;
+
 function relay(action: SerializedAction): void {
   if (_relayFn && !_suppressRelay) _relayFn(action);
 }
@@ -28,6 +36,165 @@ function relay(action: SerializedAction): void {
 export function suppressRelay(): void  { _suppressRelay = true;  }
 /** Call after  applyRelayedAction to restore relay. */
 export function unsuppressRelay(): void { _suppressRelay = false; }
+
+/**
+ * Called by every store action that constitutes a real "game action"
+ * (recruit, play a card, use a Limited/Open ability, etc.) during the
+ * Action Phase.
+ *
+ * Effect:
+ *  - Passes priority to the opponent so they may respond.
+ *  - Resets the consecutive-pass counter to 0 so the phase does NOT end
+ *    just because the opponent then auto-passes; the phase only ends when
+ *    BOTH players pass back-to-back with no action in between.
+ *
+ * No-op outside the Action Phase (battle actions, dynasty actions, etc.
+ * should not affect the action-phase priority system).
+ */
+function onActionTaken(get: () => GameStore, set: (p: Partial<GameStore>) => void, actingAs: 'player' | 'opponent'): void {
+  const { turnPhase } = get();
+  if (turnPhase !== 'action') return;
+  // Pass priority to the other side and clear the consecutive-pass streak.
+  const newPriority = actingAs === 'player' ? 'opponent' : 'player';
+  set({ priority: newPriority, consecutivePasses: 0 });
+}
+
+/**
+ * Resolve the Strike step of an AEG duel.
+ *
+ * AEG duel resolution:
+ *   Compare (duelist Chi + sum of focused Focus values) for each side.
+ *   Higher total wins.  Personalities with the Duelist keyword win ties;
+ *   if both or neither have Duelist, the challenger wins ties.
+ *
+ * The triggering card's text specifies the actual consequences (dishonor,
+ * bow, kill, etc.) — those are applied by the player manually after the
+ * engine logs the winner.  The engine's job here is:
+ *   1. Log the Strike breakdown and winner.
+ *   2. Move all focused cards to the owner's Fate discard pile.
+ *   3. Clear pendingDuel.
+ */
+function resolveDuel(
+  duel: import('../types/cards').PendingDuel,
+  get: () => GameStore,
+  set: (p: Partial<GameStore>) => void,
+  log: (msg: string, cat: LogCategory, side: 'player' | 'opponent' | 'system') => void,
+): void {
+  const { player, opponent } = get();
+  const {
+    challengerInstanceId, defenderInstanceId,
+    challengerSide, triggerCardName,
+    playerFocusCards, opponentFocusCards,
+  } = duel;
+
+  const defenderSide: 'player' | 'opponent' = challengerSide === 'player' ? 'opponent' : 'player';
+  const challengerPs = challengerSide === 'player' ? player : opponent;
+  const defenderPs   = defenderSide   === 'player' ? player : opponent;
+
+  const challenger = challengerPs.personalitiesHome.find(p => p.instanceId === challengerInstanceId);
+  const defender   = defenderPs.personalitiesHome.find(p => p.instanceId === defenderInstanceId);
+
+  if (!challenger || !defender) {
+    log('Duel cancelled — one of the duelists is no longer in play', 'other', 'system');
+    set({ pendingDuel: null });
+    return;
+  }
+
+  // Focus totals
+  const challengerFocusCards = challengerSide === 'player' ? playerFocusCards : opponentFocusCards;
+  const defenderFocusCards   = defenderSide   === 'player' ? playerFocusCards : opponentFocusCards;
+  const challengerFocusTotal = challengerFocusCards.reduce((s, c) => s + c.focusValue, 0);
+  const defenderFocusTotal   = defenderFocusCards.reduce((s, c) => s + c.focusValue, 0);
+
+  const challengerTotal = calcEffectiveChi(challenger) + challengerFocusTotal;
+  const defenderTotal   = calcEffectiveChi(defender)   + defenderFocusTotal;
+
+  // Determine winner — Duelist keyword wins ties; challenger wins ties otherwise
+  const challengerHasDuelist = challenger.card.keywords.some(k => k.toLowerCase().trim() === 'duelist')
+    || challenger.tempKeywords.some(k => k.toLowerCase().trim() === 'duelist');
+  const defenderHasDuelist   = defender.card.keywords.some(k => k.toLowerCase().trim() === 'duelist')
+    || defender.tempKeywords.some(k => k.toLowerCase().trim() === 'duelist');
+
+  let challengerWins: boolean;
+  if (challengerTotal > defenderTotal) {
+    challengerWins = true;
+  } else if (defenderTotal > challengerTotal) {
+    challengerWins = false;
+  } else {
+    // Tie — Duelist wins; if both/neither have Duelist, challenger wins
+    challengerWins = defenderHasDuelist && !challengerHasDuelist ? false : true;
+  }
+
+  const winner = challengerWins ? challenger : defender;
+  const winnerSide: 'player' | 'opponent' = challengerWins ? challengerSide : defenderSide;
+  const winnerFocusTotal   = challengerWins ? challengerFocusTotal : defenderFocusTotal;
+  const loserFocusTotal    = challengerWins ? defenderFocusTotal   : challengerFocusTotal;
+  const loser  = challengerWins ? defender  : challenger;
+
+  // Log Strike result — reveal face-down cards
+  const revealFocusCards = (cards: import('../types/cards').FocusCard[]) =>
+    cards.map(c => `${c.cardName}(F${c.focusValue}${c.faceDown ? '↓' : ''})`).join(', ') || 'none';
+
+  log(
+    `⚔ Strike — ${triggerCardName}: ${challenger.card.name} Chi${calcEffectiveChi(challenger)}+F${challengerFocusTotal}=${challengerTotal} [${revealFocusCards(challengerFocusCards)}] vs ${defender.card.name} Chi${calcEffectiveChi(defender)}+F${defenderFocusTotal}=${defenderTotal} [${revealFocusCards(defenderFocusCards)}]`,
+    'other', 'system',
+  );
+  const resolvedByDuelist = challengerTotal === defenderTotal;
+  log(
+    `${winner.card.name} wins the duel${resolvedByDuelist ? ` (tie — ${winner.card.name} has Duelist)` : ''}! ${loser.card.name} loses.${_duelResolveCallback ? '' : ' Apply triggering card effects manually.'}`,
+    'other', winnerSide,
+  );
+
+  // Move focused cards to Fate discard for each side
+  const playerDiscards = playerFocusCards.map(c => {
+    const inst = player.hand.find(h => h.instanceId === c.instanceId)
+      ?? player.fateDeck.find(h => h.instanceId === c.instanceId);
+    return inst ? { ...inst, location: 'fateDiscard' as import('../types/cards').ZoneId } : null;
+  }).filter(Boolean) as CardInstance[];
+
+  const opponentDiscards = opponentFocusCards.map(c => {
+    const inst = opponent.hand.find(h => h.instanceId === c.instanceId)
+      ?? opponent.fateDeck.find(h => h.instanceId === c.instanceId);
+    return inst ? { ...inst, location: 'fateDiscard' as import('../types/cards').ZoneId } : null;
+  }).filter(Boolean) as CardInstance[];
+
+  const playerFocusIds   = new Set(playerFocusCards.map(c => c.instanceId));
+  const opponentFocusIds = new Set(opponentFocusCards.map(c => c.instanceId));
+
+  set({
+    pendingDuel: null,
+    player: {
+      ...player,
+      hand:       player.hand.filter(c => !playerFocusIds.has(c.instanceId)),
+      fateDeck:   player.fateDeck.filter(c => !playerFocusIds.has(c.instanceId)),
+      fateDiscard: [...playerDiscards, ...player.fateDiscard],
+    },
+    opponent: {
+      ...opponent,
+      hand:       opponent.hand.filter(c => !opponentFocusIds.has(c.instanceId)),
+      fateDeck:   opponent.fateDeck.filter(c => !opponentFocusIds.has(c.instanceId)),
+      fateDiscard: [...opponentDiscards, ...opponent.fateDiscard],
+    },
+  });
+
+  // Fire the triggering ability's effect callback, then clear it.
+  // This is where the card text's win/loss effects are applied
+  // (bow loser, dishonor loser, kill loser, draw card, etc.)
+  // and where any trait bonuses on the winner can be appended by the caller.
+  const cb = _duelResolveCallback;
+  _duelResolveCallback = null;
+  if (cb) {
+    const result: import('../types/cards').DuelResult = {
+      winner, loser, winnerSide,
+      loserSide: winnerSide === 'player' ? 'opponent' : 'player',
+      challengerWon: challengerWins,
+      challenger, defender,
+      challengerTotal, defenderTotal,
+      resolvedByDuelist,
+    };
+    cb(result);
+  }
+}
 
 type GamePhase = 'setup' | 'lobby' | 'playing';
 
@@ -133,6 +300,12 @@ interface GameStore {
     /** Candidates from BOTH sides (player + opponent) */
     candidates: import('../engine/gameActions').ReactionCandidate[];
   } | null;
+
+  /**
+   * Non-null while a duel is in progress and waiting for bids.
+   * The DuelModal component displays the bidding UI when this is set.
+   */
+  pendingDuel: import('../types/cards').PendingDuel | null;
 
   /**
    * Non-null while the engine is waiting for the local player to click a target.
@@ -519,6 +692,86 @@ interface GameStore {
    */
   rehonorPersonality: (instanceId: string, target?: 'player' | 'opponent') => void;
 
+  // ── Chi, gold, return to hand ─────────────────────────────────────────────────
+  /**
+   * Add `amount` to a personality's temporary Chi modifier.
+   * Positive values are bonuses; negative values are penalties.
+   * Cleared at the same points as tempForceBonus (end of Attack Phase / Straighten Phase).
+   */
+  giveChiBonus: (instanceId: string, amount: number, target?: 'player' | 'opponent') => void;
+  /**
+   * Return an in-play personality (and all their attachments) to their controller's hand.
+   * The card leaves play and is placed face-up in the hand zone.
+   * Attachments are discarded to the Fate discard when the personality is bounced
+   * (they cannot go to hand; the personality's owner recovers only the personality itself).
+   */
+  returnToHand: (instanceId: string, target?: 'player' | 'opponent') => void;
+  /**
+   * Directly add `amount` gold to the target's pool without bowing any card.
+   * Used by card effects that produce gold as an action (e.g. "Gain 3 Gold").
+   */
+  produceGold: (amount: number, target?: 'player' | 'opponent') => void;
+
+  // ── Duel system ───────────────────────────────────────────────────────────────
+  /**
+   * Open a duel initiated by a card ability.
+   * Moves to the Challenge stage: the defending player may accept or refuse.
+   * If `canRefuse` is false the duel is mandatory and skips straight to Focus.
+   *
+   * `onResolve` — called once Strike is resolved with a full DuelResult.
+   * The callback is responsible for applying this card's win/loss effects
+   * (e.g. bow the loser, dishonor them, kill them, draw a card if you win).
+   * It can also apply any trait bonuses the winner's personality may have.
+   * If omitted, the log will instruct the player to apply effects manually.
+   *
+   * Example usage:
+   *   store.initiateDuel(myId, targetId, 'player', 'Blade of Shadows', true,
+   *     result => {
+   *       if (result.winnerSide === 'player')
+   *         store.bowCard(result.loser.instanceId, 'opponent');
+   *     }
+   *   );
+   */
+  initiateDuel: (
+    challengerInstanceId: string,
+    defenderInstanceId: string,
+    challengerSide: 'player' | 'opponent',
+    triggerCardName?: string,
+    canRefuse?: boolean,
+    onResolve?: (result: import('../types/cards').DuelResult) => void,
+  ) => void;
+  /**
+   * Defender accepts the challenge — moves to the Focus stage.
+   * Focus begins with the defender's turn to play or pass.
+   */
+  acceptDuel: () => void;
+  /**
+   * Defender refuses the challenge — clears the duel.
+   * The triggering card's text specifies the refusal penalty; apply it manually.
+   */
+  refuseDuel: () => void;
+  /**
+   * Local player plays a card from their hand face-down into their Focus pool.
+   * The card's identity is hidden from the opponent until Strike.
+   */
+  focusFromHand: (instanceId: string) => void;
+  /**
+   * Local player reveals the top card of their Fate deck and adds it face-up to their Focus pool.
+   * The card is immediately visible to both players.
+   */
+  focusFromDeck: () => void;
+  /**
+   * Local player passes their Focus turn.
+   * If both players pass consecutively, the duel proceeds to Strike (auto-resolved).
+   */
+  passFocus: () => void;
+  /** Called when the opponent focuses a card (relayed). */
+  opponentFocusCard: (focusValue: number, faceDown: boolean, instanceId: string, cardName: string) => void;
+  /** Called when the opponent passes their Focus turn (relayed). */
+  opponentPassFocus: () => void;
+  /** Cancel the active duel without resolving it (used by card effects that negate duels). */
+  cancelDuel: () => void;
+
   // ── Targeting system ──────────────────────────────────────────────────────────
   /**
    * Ask the local player to select one card from those matching `filter`.
@@ -792,6 +1045,7 @@ export const useGameStore = create<GameStore>((set, get) => {
   gameResult: null,
   imperialFavor: null,
   pendingReaction: null,
+  pendingDuel: null,
   pendingTarget: null,
   battleAssignments: [],
   defenderAssignments: [],
@@ -816,6 +1070,7 @@ export const useGameStore = create<GameStore>((set, get) => {
       battleAssignments: [], defenderAssignments: [], battleStage: null,
       currentBattlefield: null, battleWindowPriority: 'player', battleWindowPasses: 0,
       cyclingActive: null, gameResult: null,
+      pendingReaction: null, pendingDuel: null, pendingTarget: null,
     });
   },
 
@@ -1073,6 +1328,7 @@ export const useGameStore = create<GameStore>((set, get) => {
         proclaimUsed: proclaim ? true : ps.proclaimUsed,
       },
     });
+    onActionTaken(get, set, target);
     if (!isHolding) {
       get().fireTrigger('personality-recruited', { side: target, cardInstanceId: recruited.instanceId });
     }
@@ -1181,7 +1437,7 @@ export const useGameStore = create<GameStore>((set, get) => {
         ...ps,
         strongholdBowed: false,
         holdingsInPlay:   ps.holdingsInPlay.map(c => ({ ...c, bowed: false })),
-        personalitiesHome: ps.personalitiesHome.map(c => ({ ...c, bowed: false, tempForceBonus: 0, tempKeywords: [] })),
+        personalitiesHome: ps.personalitiesHome.map(c => ({ ...c, bowed: false, tempForceBonus: 0, tempChiBonus: 0, tempKeywords: [] })),
         specialsInPlay:   ps.specialsInPlay.map(c => ({ ...c, bowed: false })),
         goldPool: 0,
         abilitiesUsed: [],
@@ -1257,7 +1513,7 @@ export const useGameStore = create<GameStore>((set, get) => {
           if (isBH && newTurnNumber === 2) return c; // stays bowed — first turn for this player
           return { ...c, bowed: false };
         }),
-        personalitiesHome:  incoming.personalitiesHome.map(c => ({ ...c, bowed: false, tempForceBonus: 0, tempKeywords: [] })),
+        personalitiesHome:  incoming.personalitiesHome.map(c => ({ ...c, bowed: false, tempForceBonus: 0, tempChiBonus: 0, tempKeywords: [] })),
         specialsInPlay:     incoming.specialsInPlay.map(c => ({ ...c, bowed: false })),
         proclaimUsed: false,
         goldPool: 0,
@@ -1391,6 +1647,7 @@ export const useGameStore = create<GameStore>((set, get) => {
           goldPool: Math.max(0, ps.goldPool - cost),
         },
       });
+      onActionTaken(get, set, target);
     } else {
       // ── Strategy / other fate card: resolve → Fate discard ──
       const abilityNote = selectedAbility
@@ -1409,6 +1666,7 @@ export const useGameStore = create<GameStore>((set, get) => {
           goldPool: Math.max(0, ps.goldPool - cost),
         },
       });
+      onActionTaken(get, set, target);
     }
   },
 
@@ -1494,6 +1752,7 @@ export const useGameStore = create<GameStore>((set, get) => {
     if (!repeatable) {
       set({ [target]: { ...ps, abilitiesUsed: [...ps.abilitiesUsed, instanceId] } });
     }
+    onActionTaken(get, set, target);
   },
 
   useKharmic: (source, instanceId, target, provinceIndex) => {
@@ -1529,6 +1788,7 @@ export const useGameStore = create<GameStore>((set, get) => {
           fateDiscard: [{ ...card, location: 'fateDiscard' as ZoneId }, ...ps.fateDiscard],
         },
       });
+      onActionTaken(get, set, target);
     } else {
       // source === 'province'
       if (provinceIndex === undefined) return;
@@ -1558,6 +1818,7 @@ export const useGameStore = create<GameStore>((set, get) => {
           dynastyDiscard: [{ ...card, location: 'dynastyDiscard' as ZoneId }, ...ps.dynastyDiscard],
         },
       });
+      onActionTaken(get, set, target);
     }
   },
 
@@ -1606,6 +1867,7 @@ export const useGameStore = create<GameStore>((set, get) => {
         lobbyUsed: true,
       },
     });
+    onActionTaken(get, set, target);
   },
 
   useFavorLimited: (discardCardInstanceId, target = 'player') => {
@@ -1639,6 +1901,7 @@ export const useGameStore = create<GameStore>((set, get) => {
           fateDeck: restFate,
         },
       });
+      onActionTaken(get, set, target);
     } else {
       // Relay: opponent used Favor Limited — we only know the Favor is gone; hand/deck are hidden
       pushLog('Opponent used Rulebook Favor Limited — Imperial Favor discarded', 'other', 'opponent');
@@ -1802,6 +2065,7 @@ export const useGameStore = create<GameStore>((set, get) => {
         personalitiesHome: newPersonalitiesHome,
       },
     });
+    onActionTaken(get, set, target);
   },
 
   // ── Battle ────────────────────────────────────────────────────────────────
@@ -1833,12 +2097,10 @@ export const useGameStore = create<GameStore>((set, get) => {
   },
 
   beginResolution: () => {
-    const { battleAssignments } = get();
-    if (battleAssignments.length === 0) {
-      pushLog('No attackers assigned — ending battle', 'phase', 'system');
-      set({ turnPhase: 'dynasty', battleStage: null, battleAssignments: [] });
-      return;
-    }
+    // Always advance to defender-assigning regardless of how many infantry were
+    // assigned.  A player with only Cavalry legitimately commits 0 infantry and
+    // still needs to go through the full assignment sequence.
+    // Use "No Battle" (endAttackPhase) to skip the attack phase entirely.
     pushLog('Infantry committed — defender may now assign units', 'phase', 'system');
     relay({ type: 'commit-infantry' });
     set({ battleStage: 'defender-assigning' });
@@ -2166,9 +2428,9 @@ export const useGameStore = create<GameStore>((set, get) => {
     // Conqueror units don't bow on return home; also clear all tempForceBonus on both sides
     const newPersonalitiesHome = player.personalitiesHome.map(p => {
       const bowed = assignedIds.includes(p.instanceId) && !isConquerorUnit(p) ? true : p.bowed;
-      return { ...p, bowed, tempForceBonus: 0, tempKeywords: [] };
+      return { ...p, bowed, tempForceBonus: 0, tempChiBonus: 0, tempKeywords: [] };
     });
-    const newOpponentHome = opponent.personalitiesHome.map(p => ({ ...p, tempForceBonus: 0, tempKeywords: [] }));
+    const newOpponentHome = opponent.personalitiesHome.map(p => ({ ...p, tempForceBonus: 0, tempChiBonus: 0, tempKeywords: [] }));
     pushLog('Attack Phase ended — unresolved attackers return home', 'phase', 'system');
     relay({ type: 'end-attack-phase' });
     set({
@@ -3044,6 +3306,217 @@ export const useGameStore = create<GameStore>((set, get) => {
     if (updated === ps.personalitiesHome) return; // nothing changed
     if (target === 'player') relay({ type: 'rehonor-personality', instanceId });
     set({ [target]: { ...ps, personalitiesHome: updated } });
+  },
+
+  // ── Chi, gold, return to hand ─────────────────────────────────────────────────
+
+  giveChiBonus: (instanceId, amount, target = 'player') => {
+    const ps = get()[target];
+    const who = target === 'player' ? 'You' : 'Opponent';
+    const updated = ps.personalitiesHome.map(p => {
+      if (p.instanceId !== instanceId) return p;
+      const newChi = (p.tempChiBonus ?? 0) + amount;
+      pushLog(`${who} ${amount >= 0 ? '+' : ''}${amount} Chi → ${p.card.name}`, 'other', target);
+      return { ...p, tempChiBonus: newChi };
+    });
+    if (updated === ps.personalitiesHome) return;
+    if (target === 'player') relay({ type: 'give-chi-bonus', instanceId, amount });
+    set({ [target]: { ...ps, personalitiesHome: updated } });
+  },
+
+  returnToHand: (instanceId, target = 'player') => {
+    const ps = get()[target];
+    const who = target === 'player' ? 'You' : 'Opponent';
+    // Search personalitiesHome — only personalities can go to hand
+    const personality = ps.personalitiesHome.find(p => p.instanceId === instanceId);
+    if (!personality) {
+      pushLog(`returnToHand: ${instanceId} not found in personalitiesHome`, 'other', 'system');
+      return;
+    }
+    // Attachments on the personality are discarded (they can't go to hand)
+    const attachDiscards: CardInstance[] = personality.attachments.map(a => ({
+      ...a, location: 'fateDiscard' as ZoneId,
+    }));
+    const returned: CardInstance = { ...personality, location: 'hand', bowed: false, attachments: [], tempForceBonus: 0, tempChiBonus: 0, tempKeywords: [] };
+    pushLog(`${who} returned ${personality.card.name} to hand${attachDiscards.length ? ` (${attachDiscards.length} attachment${attachDiscards.length > 1 ? 's' : ''} discarded)` : ''}`, 'other', target);
+    if (target === 'player') relay({ type: 'return-to-hand', instanceId });
+    set({
+      [target]: {
+        ...ps,
+        personalitiesHome: ps.personalitiesHome.filter(p => p.instanceId !== instanceId),
+        hand: [...ps.hand, returned],
+        fateDiscard: [...attachDiscards, ...ps.fateDiscard],
+      },
+    });
+  },
+
+  produceGold: (amount, target = 'player') => {
+    const ps = get()[target];
+    const who = target === 'player' ? 'You' : 'Opponent';
+    pushLog(`${who} gained ${amount}g from a card effect`, 'gold', target);
+    if (target === 'player') relay({ type: 'produce-gold', amount });
+    set({ [target]: { ...ps, goldPool: ps.goldPool + amount } });
+  },
+
+  // ── Duel system ───────────────────────────────────────────────────────────────
+
+  initiateDuel: (challengerInstanceId, defenderInstanceId, challengerSide, triggerCardName = 'Card effect', canRefuse = true, onResolve) => {
+    // Store the callback (non-serialisable — lives outside Zustand)
+    _duelResolveCallback = onResolve ?? null;
+
+    const defenderSide: 'player' | 'opponent' = challengerSide === 'player' ? 'opponent' : 'player';
+    if (canRefuse) {
+      pushLog(`${triggerCardName}: Duel challenge — defender may accept or refuse`, 'other', 'system');
+    } else {
+      pushLog(`${triggerCardName}: Mandatory duel — proceeding to Focus phase`, 'other', 'system');
+    }
+    const duel: import('../types/cards').PendingDuel = {
+      challengerInstanceId,
+      defenderInstanceId,
+      challengerSide,
+      triggerCardName,
+      canRefuse,
+      stage: canRefuse ? 'challenge' : 'focus',
+      // Focus starts with the defender
+      focusTurn: defenderSide,
+      focusPasses: 0,
+      playerFocusCards: [],
+      opponentFocusCards: [],
+    };
+    set({ pendingDuel: duel });
+  },
+
+  acceptDuel: () => {
+    const { pendingDuel } = get();
+    if (!pendingDuel || pendingDuel.stage !== 'challenge') return;
+    const defenderSide: 'player' | 'opponent' = pendingDuel.challengerSide === 'player' ? 'opponent' : 'player';
+    pushLog('Duel accepted — Focus phase begins (defender focuses first)', 'other', 'system');
+    relay({ type: 'duel-accept' });
+    set({ pendingDuel: { ...pendingDuel, stage: 'focus', focusTurn: defenderSide, focusPasses: 0 } });
+  },
+
+  refuseDuel: () => {
+    const { pendingDuel } = get();
+    if (!pendingDuel || !pendingDuel.canRefuse) return;
+    pushLog(`Duel refused — apply the triggering card's refusal penalty manually`, 'other', 'system');
+    relay({ type: 'duel-refuse' });
+    _duelResolveCallback = null;
+    set({ pendingDuel: null });
+  },
+
+  focusFromHand: (instanceId) => {
+    const { pendingDuel, player } = get();
+    if (!pendingDuel || pendingDuel.stage !== 'focus' || pendingDuel.focusTurn !== 'player') return;
+    const card = player.hand.find(c => c.instanceId === instanceId);
+    if (!card) return;
+    const focusValue = Number(card.card.focus) || 0;
+    const focusCard: import('../types/cards').FocusCard = {
+      instanceId,
+      focusValue,
+      faceDown: true,
+      cardName: card.card.name,
+    };
+    pushLog(`You focus ${card.card.name} face-down (Focus ${focusValue})`, 'other', 'player');
+    relay({ type: 'duel-focus-card', instanceId, focusValue, faceDown: true, cardName: card.card.name });
+    set({
+      pendingDuel: {
+        ...pendingDuel,
+        playerFocusCards: [...pendingDuel.playerFocusCards, focusCard],
+        focusTurn: pendingDuel.challengerSide === 'player'
+          ? pendingDuel.focusTurn === 'player' ? 'opponent' : 'player'
+          : pendingDuel.focusTurn === 'player' ? 'opponent' : 'player',
+        focusPasses: 0,
+      },
+    });
+  },
+
+  focusFromDeck: () => {
+    const { pendingDuel, player } = get();
+    if (!pendingDuel || pendingDuel.stage !== 'focus' || pendingDuel.focusTurn !== 'player') return;
+    if (player.fateDeck.length === 0) {
+      pushLog('Cannot focus from deck — Fate deck is empty', 'other', 'player');
+      return;
+    }
+    const [top, ...rest] = player.fateDeck;
+    const focusValue = Number(top.card.focus) || 0;
+    const focusCard: import('../types/cards').FocusCard = {
+      instanceId: top.instanceId,
+      focusValue,
+      faceDown: false,
+      cardName: top.card.name,
+    };
+    pushLog(`You focus ${top.card.name} face-up from deck (Focus ${focusValue})`, 'other', 'player');
+    relay({ type: 'duel-focus-card', instanceId: top.instanceId, focusValue, faceDown: false, cardName: top.card.name });
+    set({
+      pendingDuel: {
+        ...pendingDuel,
+        playerFocusCards: [...pendingDuel.playerFocusCards, focusCard],
+        focusTurn: pendingDuel.focusTurn === 'player' ? 'opponent' : 'player',
+        focusPasses: 0,
+      },
+      player: { ...player, fateDeck: rest },
+    });
+  },
+
+  passFocus: () => {
+    const { pendingDuel } = get();
+    if (!pendingDuel || pendingDuel.stage !== 'focus' || pendingDuel.focusTurn !== 'player') return;
+    relay({ type: 'duel-pass-focus' });
+    const newPasses = pendingDuel.focusPasses + 1;
+    if (newPasses >= 2) {
+      // Both players passed — proceed to Strike
+      resolveDuel({ ...pendingDuel, focusPasses: 2 }, get, set, pushLog);
+    } else {
+      pushLog('You pass focus', 'other', 'player');
+      set({
+        pendingDuel: {
+          ...pendingDuel,
+          focusTurn: 'opponent',
+          focusPasses: newPasses,
+        },
+      });
+    }
+  },
+
+  opponentFocusCard: (focusValue, faceDown, instanceId, cardName) => {
+    const { pendingDuel } = get();
+    if (!pendingDuel || pendingDuel.stage !== 'focus') return;
+    const focusCard: import('../types/cards').FocusCard = { instanceId, focusValue, faceDown, cardName };
+    const hiddenName = faceDown ? 'a face-down card' : cardName;
+    pushLog(`Opponent focuses ${hiddenName} (Focus ${faceDown ? '?' : focusValue})`, 'other', 'opponent');
+    set({
+      pendingDuel: {
+        ...pendingDuel,
+        opponentFocusCards: [...pendingDuel.opponentFocusCards, focusCard],
+        focusTurn: 'player',
+        focusPasses: 0,
+      },
+    });
+  },
+
+  opponentPassFocus: () => {
+    const { pendingDuel } = get();
+    if (!pendingDuel || pendingDuel.stage !== 'focus') return;
+    const newPasses = pendingDuel.focusPasses + 1;
+    if (newPasses >= 2) {
+      resolveDuel({ ...pendingDuel, focusPasses: 2 }, get, set, pushLog);
+    } else {
+      pushLog('Opponent passes focus', 'other', 'opponent');
+      set({
+        pendingDuel: {
+          ...pendingDuel,
+          focusTurn: 'player',
+          focusPasses: newPasses,
+        },
+      });
+    }
+  },
+
+  cancelDuel: () => {
+    if (!get().pendingDuel) return;
+    pushLog('Duel cancelled', 'other', 'system');
+    _duelResolveCallback = null;
+    set({ pendingDuel: null });
   },
 
   // ── Targeting system ──────────────────────────────────────────────────────────

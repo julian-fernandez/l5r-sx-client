@@ -363,6 +363,27 @@ function applyRelayedAction(action: import('../server/src/types').SerializedActi
       case 'rehonor-personality':
         store.rehonorPersonality(action.instanceId, 'opponent');
         break;
+      case 'give-chi-bonus':
+        store.giveChiBonus(action.instanceId, action.amount, 'opponent');
+        break;
+      case 'return-to-hand':
+        store.returnToHand(action.instanceId, 'opponent');
+        break;
+      case 'produce-gold':
+        store.produceGold(action.amount, 'opponent');
+        break;
+      case 'duel-accept':
+        store.acceptDuel();
+        break;
+      case 'duel-refuse':
+        store.refuseDuel();
+        break;
+      case 'duel-focus-card':
+        store.opponentFocusCard(action.focusValue, action.faceDown, action.instanceId, action.cardName);
+        break;
+      case 'duel-pass-focus':
+        store.opponentPassFocus();
+        break;
       default:
         // For unrecognized actions, do nothing — manual resolution handles complex effects
         break;

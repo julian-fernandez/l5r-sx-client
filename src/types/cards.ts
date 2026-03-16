@@ -131,6 +131,12 @@ export interface CardInstance {
    */
   tempForceBonus: number;
   /**
+   * Temporary Chi modifier granted or penalised by card effects this turn.
+   * Added to calcEffectiveChi; cleared at the same points as tempForceBonus.
+   * Use positive values for bonuses, negative for penalties.
+   */
+  tempChiBonus: number;
+  /**
    * Keywords temporarily granted to this card by card effects.
    * These stack on top of the printed keywords; cleared each Straighten Phase.
    * Use hasEffectiveKeyword() to check both printed and temp keywords.
@@ -378,4 +384,102 @@ export interface ParsedDeck {
   fate: DeckEntry[];      // strategies, spells, items, followers, rings
   missing: string[];      // card names that couldn't be matched
   violations: string[];   // deckbuilding rule violations (Loyal, Unique)
+}
+
+// ─── Duel ─────────────────────────────────────────────────────────────────────
+
+/**
+ * One card played into the Focus pool during a duel.
+ *
+ * Cards may come from two sources:
+ *  - Hand (face-down): identity hidden from opponent during Focus; revealed at Strike.
+ *  - Top of Fate deck (face-up): immediately visible to both players.
+ *
+ * After Strike, all focused cards move to the owner's Fate discard pile.
+ */
+export interface FocusCard {
+  /** Instance ID of the focused card (used to remove it from hand/deck after the duel). */
+  instanceId: string;
+  /** The card's printed Focus value — this is what gets added to the duelist's Chi. */
+  focusValue: number;
+  /** True when played face-down from hand; false when revealed face-up from deck top. */
+  faceDown: boolean;
+  /** Card name — revealed at Strike for face-down cards. */
+  cardName: string;
+}
+
+/**
+ * State for an active AEG-edition duel between two personalities.
+ *
+ * AEG duel sequence:
+ *   1. CHALLENGE — the triggering card ability challenges a target personality.
+ *      If `canRefuse` is true, the defender may decline (triggering card's text specifies the penalty).
+ *   2. FOCUS — beginning with the DEFENDER, players alternate playing Focus cards:
+ *        a. A card from hand, placed face-down (identity hidden until Strike).
+ *        b. The top card of their Fate deck, placed face-up (immediately revealed).
+ *      Both players may instead pass. Once both pass consecutively, proceed to Strike.
+ *   3. STRIKE — compare (duelist Chi + sum of focused Focus values) for each side.
+ *      Higher total wins. Personalities with the Duelist keyword win ties.
+ *      If both or neither duelist has Duelist, the challenger wins ties.
+ *   4. EFFECTS — the triggering card's text specifies what happens to the winner/loser
+ *      (commonly: dishonor, bow, kill, or some card draw). Applied manually for now.
+ */
+export interface PendingDuel {
+  /** Personality initiating the challenge. */
+  challengerInstanceId: string;
+  /** Personality receiving the challenge. */
+  defenderInstanceId: string;
+  /** Which side controls the challenger. */
+  challengerSide: 'player' | 'opponent';
+  /** Name of the card or effect that triggered the duel (displayed in the UI). */
+  triggerCardName: string;
+  /** Whether the defending player may refuse the duel. */
+  canRefuse: boolean;
+  /** 'challenge' = awaiting defender accept/refuse; 'focus' = Focus phase active. */
+  stage: 'challenge' | 'focus';
+  /** Whose turn it is to play a Focus card or pass (starts with the defender's side). */
+  focusTurn: 'player' | 'opponent';
+  /** Number of consecutive passes in the current Focus phase (2 → proceed to Strike). */
+  focusPasses: number;
+  /** Focus cards played by the local player. */
+  playerFocusCards: FocusCard[];
+  /** Focus cards played by the opponent. */
+  opponentFocusCards: FocusCard[];
+}
+
+/**
+ * Passed to the `onResolve` callback supplied to `initiateDuel()`.
+ *
+ * The callback is provided by whichever card ability triggered the duel and
+ * is responsible for applying the effect text of that ability
+ * (e.g. "bow the loser", "dishonor the loser", "if you win, draw a card").
+ *
+ * Trait bonuses (e.g. a personality that gains +1 honor for every duel they win)
+ * should also be applied here — the caller has full context to do so.
+ *
+ * Note: Strike resolution (Chi + Focus comparison) and Focus card discarding
+ * are handled by the engine before this callback fires.  The engine deliberately
+ * does NOT auto-apply win/loss effects because those vary by card.
+ */
+export interface DuelResult {
+  /** The duelist with the higher strike total (Chi + Focus). */
+  winner: CardInstance;
+  /** The duelist with the lower strike total. */
+  loser: CardInstance;
+  /** Side that controls the winner. */
+  winnerSide: 'player' | 'opponent';
+  /** Side that controls the loser. */
+  loserSide: 'player' | 'opponent';
+  /** True when the challenger's side won. */
+  challengerWon: boolean;
+  /** Challenger personality (convenience reference). */
+  challenger: CardInstance;
+  /** Defender personality (convenience reference). */
+  defender: CardInstance;
+  /** Final strike total for the challenger (Chi + sum of focused Focus values). */
+  challengerTotal: number;
+  /** Final strike total for the defender. */
+  defenderTotal: number;
+  /** True when the result was decided by the Duelist keyword (totals were equal). */
+  resolvedByDuelist: boolean;
 }

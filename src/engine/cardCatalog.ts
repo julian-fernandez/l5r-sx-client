@@ -87,6 +87,31 @@ function parseStrongholdStats(name: string, text: string): {
   };
 }
 
+/**
+ * Resolve the effective gold production of a holding or stronghold.
+ *
+ * Older L5R cards express gold production as ability text
+ * (e.g. "Bow this Holding: Produce 2 Gold.") rather than as a numeric stat
+ * in the `goldProduction` field. This function treats both representations
+ * identically: if the JSON field already carries a positive number, use it;
+ * otherwise try to extract the value from the card text.
+ *
+ * Patterns matched (case-insensitive):
+ *   "Produce X Gold"              — catches bare produce lines
+ *   "Bow …: Produce X Gold"       — the classic older-card phrasing
+ *   "Bow … to Produce X Gold"     — alternative phrasing
+ *
+ * Returns 0 when no gold production can be determined.
+ */
+function resolveGoldProduction(rawStat: number | string, text: string): number {
+  const fromStat = Number(rawStat) || 0;
+  if (fromStat > 0) return fromStat;
+
+  // Try to extract from card text.  The number appears right before the word "Gold".
+  const match = text.match(/[Pp]roduce\s+(\d+)\s+[Gg]old/);
+  return match ? parseInt(match[1], 10) : 0;
+}
+
 export function normalizeCard(raw: CardCatalogEntry): NormalizedCard {
   const type = (raw.type?.[0] ?? 'unknown').toLowerCase() as CardType;
   const text = raw.text?.[0] ?? '';
@@ -102,7 +127,7 @@ export function normalizeCard(raw: CardCatalogEntry): NormalizedCard {
     personalHonor: raw.ph?.[0] ?? 0,
     honorRequirement: raw.honor?.[0] ?? 0,
     focus: Number(raw.focus?.[0]) || 0,
-    goldProduction: raw.goldProduction?.[0] ?? 0,
+    goldProduction: resolveGoldProduction(raw.goldProduction?.[0] ?? 0, text),
     keywords: raw.keywords ?? [],
     text,
     imagePath: raw.imagePath ?? '',

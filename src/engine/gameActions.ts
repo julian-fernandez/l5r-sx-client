@@ -520,6 +520,7 @@ export function createInstance(card: NormalizedCard, location: ZoneId, faceUp = 
     fateTokens: 0,
     honorTokens: 0,
     tempForceBonus: 0,
+    tempChiBonus: 0,
     tempKeywords: [],
     dishonored: false,
   };
@@ -558,7 +559,7 @@ export function calcEffectiveChi(p: CardInstance): number {
   const baseChi   = Number(p.card.chi) || 0;
   const itemBonus = p.attachments.reduce((sum, a) => sum + (Number(a.card.chi) || 0), 0);
   const tokenBonus = p.tokens.reduce((s, t) => s + (t.chi ?? 0), 0);
-  return baseChi + itemBonus + tokenBonus;
+  return baseChi + itemBonus + tokenBonus + (p.tempChiBonus ?? 0);
 }
 
 /**

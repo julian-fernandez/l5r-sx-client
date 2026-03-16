@@ -7,6 +7,7 @@ import { getValidAttachTargets } from './CardResolutionOverlay';
 import { ManualResolutionOverlay } from './ManualResolutionOverlay';
 import { ReactionPrompt } from './ReactionPrompt';
 import { TargetingOverlay } from './TargetingOverlay';
+import { DuelModal } from './DuelModal';
 import { GameRow } from './GameRow';
 import { InPlayRow } from './InPlayRow';
 import { CardPreview } from './CardPreview';
@@ -209,6 +210,33 @@ export function Board({ player, opponent, activePlayer, onReset, multiplayerMode
 
     return () => clearTimeout(timer);
   }, [battleStage, defenderAssignments, battleAssignments, opponent.personalitiesHome, assignDefender, commitDefenderCavalry, multiplayerMode]);
+
+  // ── Solo duel auto-bot ────────────────────────────────────────────────────────
+  // In multiplayer the real opponent handles duel steps on their own client.
+  // In solo mode, the bot:
+  //   - Challenge stage: auto-accepts if the bot is the defender (after a short delay).
+  //   - Focus stage: immediately passes when it's the bot's turn to focus.
+  const pendingDuel      = useGameStore(s => s.pendingDuel);
+  const acceptDuelAction = useGameStore(s => s.acceptDuel);
+  const opponentPassFocusAction = useGameStore(s => s.opponentPassFocus);
+  useEffect(() => {
+    if (multiplayerMode) return;
+    if (!pendingDuel) return;
+
+    const defenderSide: 'player' | 'opponent' = pendingDuel.challengerSide === 'player' ? 'opponent' : 'player';
+
+    if (pendingDuel.stage === 'challenge' && defenderSide === 'opponent') {
+      // Bot auto-accepts the challenge
+      const timer = window.setTimeout(() => acceptDuelAction(), 500);
+      return () => clearTimeout(timer);
+    }
+
+    if (pendingDuel.stage === 'focus' && pendingDuel.focusTurn === 'opponent') {
+      // Bot always passes focus — player may focus freely before passing themselves
+      const timer = window.setTimeout(() => opponentPassFocusAction(), 400);
+      return () => clearTimeout(timer);
+    }
+  }, [multiplayerMode, pendingDuel, acceptDuelAction, opponentPassFocusAction]);
 
   const playFromHand        = useGameStore(s => s.playFromHand);
   const applyBattleKeyword  = useGameStore(s => s.applyBattleKeyword);
@@ -658,6 +686,7 @@ export function Board({ player, opponent, activePlayer, onReset, multiplayerMode
 
       <TargetingOverlay />
       <ReactionPrompt />
+      <DuelModal />
       <CardPreview preview={preview} />
       <CardModal card={modal} onClose={() => setModal(null)} />
       {deckBrowser && (
