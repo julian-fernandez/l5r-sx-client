@@ -65,6 +65,11 @@ const TIMING_STYLES: Record<AbilityTiming, { badge: string; selected: string; ho
     selected: 'border-orange-500 bg-orange-950/60',
     hover:    'hover:border-orange-700/60 hover:bg-orange-950/30',
   },
+  Reaction: {
+    badge:    'bg-violet-900/70 text-violet-300 border-violet-700/60',
+    selected: 'border-violet-500 bg-violet-950/60',
+    hover:    'hover:border-violet-700/60 hover:bg-violet-950/30',
+  },
 };
 
 // ── Component ─────────────────────────────────────────────────────────────────

@@ -425,7 +425,7 @@ export function BattleStrip({
 // ── Shared battlefield card grid ───────────────────────────────────────────────
 
 function AssignmentCards({
-  battlefields, byProvince,
+  battlefields, byProvince: _byProvince,
   playerPersonalities, opponentPersonalities, defenderAssignments, opponentProvinces,
   battleStage, onSelectBattlefield,
 }: {

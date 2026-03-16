@@ -127,8 +127,6 @@ function resolveDuel(
 
   const winner = challengerWins ? challenger : defender;
   const winnerSide: 'player' | 'opponent' = challengerWins ? challengerSide : defenderSide;
-  const winnerFocusTotal   = challengerWins ? challengerFocusTotal : defenderFocusTotal;
-  const loserFocusTotal    = challengerWins ? defenderFocusTotal   : challengerFocusTotal;
   const loser  = challengerWins ? defender  : challenger;
 
   // Log Strike result — reveal face-down cards

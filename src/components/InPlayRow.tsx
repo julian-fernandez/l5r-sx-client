@@ -95,7 +95,7 @@ export function InPlayRow({
   const battleWindowPriority  = useGameStore(s => s.battleWindowPriority);
   const dishonorPersonality   = useGameStore(s => s.dishonorPersonality);
   const lobby                 = useGameStore(s => s.lobby);
-  const useTacticalAdvantage  = useGameStore(s => s.useTacticalAdvantage);
+  const useFavorBattle        = useGameStore(s => s.useFavorBattle);
   const activePlayer          = useGameStore(s => s.activePlayer);
   const imperialFavor         = useGameStore(s => s.imperialFavor);
   const playerState           = useGameStore(s => s.player);

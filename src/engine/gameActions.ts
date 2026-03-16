@@ -231,7 +231,7 @@ export function findReactionCandidates(
 export function isTimingValid(
   timing: AbilityTiming,
   turnPhase: TurnPhase,
-  battleStage: 'assigning' | 'resolving' | 'engage' | 'battleWindow' | null,
+  battleStage: 'assigning' | 'defender-assigning' | 'cavalry-assigning' | 'defender-cavalry-assigning' | 'resolving' | 'engage' | 'battleWindow' | null,
   activePlayer: 'player' | 'opponent',
   priority: 'player' | 'opponent',
   battleWindowPriority: 'player' | 'opponent',
@@ -258,7 +258,7 @@ export function isTimingValid(
 export function canPlayFromHand(
   card: NormalizedCard,
   turnPhase: TurnPhase,
-  battleStage: 'assigning' | 'resolving' | 'engage' | 'battleWindow' | null,
+  battleStage: 'assigning' | 'defender-assigning' | 'cavalry-assigning' | 'defender-cavalry-assigning' | 'resolving' | 'engage' | 'battleWindow' | null,
   activePlayer: 'player' | 'opponent',
   priority: 'player' | 'opponent',
   battleWindowPriority: 'player' | 'opponent',

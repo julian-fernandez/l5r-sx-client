@@ -70,7 +70,7 @@ interface DeckBrowserState {
   title: string;
 }
 
-export function Board({ player, opponent, activePlayer, onReset, multiplayerMode = false, sendAction }: Props) {
+export function Board({ player, opponent, activePlayer, onReset, multiplayerMode = false, sendAction: _sendAction }: Props) {
   const [preview, setPreview]               = useState<PreviewState | null>(null);
   const [modal, setModal]                   = useState<NormalizedCard | null>(null);
   const [deckBrowser, setDeckBrowser]       = useState<DeckBrowserState | null>(null);
@@ -246,7 +246,6 @@ export function Board({ player, opponent, activePlayer, onReset, multiplayerMode
   const gameResult          = useGameStore(s => s.gameResult);
   const imperialFavor       = useGameStore(s => s.imperialFavor);
   const useFavorLimited     = useGameStore(s => s.useFavorLimited);
-  const useFavorBattle      = useGameStore(s => s.useFavorBattle);
 
   // ── Card play handlers ───────────────────────────────────────────────────
   const handlePlayCard = useCallback((instance: CardInstance) => {

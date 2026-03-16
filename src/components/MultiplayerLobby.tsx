@@ -147,7 +147,6 @@ export function MultiplayerLobby({
             {steps.map((label, i) => {
               const done    = i < currentStep;
               const active  = i === currentStep;
-              const pending = i > currentStep;
               return (
                 <div key={i} className="flex items-center gap-3">
                   <div className={[

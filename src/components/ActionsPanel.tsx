@@ -130,7 +130,6 @@ export function ActionsPanel({ player, onClose, onOpenDeckBrowser: _onOpenDeckBr
 
   // ── Rulebook Favor Limited (Favor Political Limited) ─────────────────────
   if (imperialFavor === 'player' && isActionPhase && isActivePlayer) {
-    const kharmic = player.hand.find(c => c.card.keywords.some(k => k.toLowerCase() === 'kharmic'));
     const firstCard = player.hand[0];
     actions.push({
       id: 'favor-limited',
