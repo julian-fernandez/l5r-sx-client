@@ -87,6 +87,7 @@ export function InPlayRow({
   const target = isOpponent ? 'opponent' : 'player';
 
   const bowCard               = useGameStore(s => s.bowCard);
+  const unbowCard             = useGameStore(s => s.unbowCard);
   const assignToBattlefield   = useGameStore(s => s.assignToBattlefield);
   const unassignFromBattle    = useGameStore(s => s.unassignFromBattle);
   const assignDefender        = useGameStore(s => s.assignDefender);
@@ -94,6 +95,11 @@ export function InPlayRow({
   const battleStage           = useGameStore(s => s.battleStage);
   const battleWindowPriority  = useGameStore(s => s.battleWindowPriority);
   const dishonorPersonality   = useGameStore(s => s.dishonorPersonality);
+  const rehonorPersonality    = useGameStore(s => s.rehonorPersonality);
+  const destroyCard           = useGameStore(s => s.destroyCard);
+  const discardFromPlay       = useGameStore(s => s.discardFromPlay);
+  const returnToHand          = useGameStore(s => s.returnToHand);
+  const moveHome              = useGameStore(s => s.moveHome);
   const lobby                 = useGameStore(s => s.lobby);
   const useFavorBattle        = useGameStore(s => s.useFavorBattle);
   const activePlayer          = useGameStore(s => s.activePlayer);
@@ -332,7 +338,7 @@ export function InPlayRow({
       }
     }
 
-    // ── Rulebook Favor Battle (player holds Favor + personality is at battlefield as attacker/defender) ──
+    // ── Rulebook Favor Battle (player holds Favor + personality is at battlefield) ──
     if (isOpponent && isBattleWindow && imperialFavor === 'player') {
       if (items.length > 0) items.push({ separator: true });
       items.push({
@@ -343,29 +349,77 @@ export function InPlayRow({
       });
     }
 
-    // ── Dishonor toggle (both sides) ──────────────────────────────────────
-    if (items.length > 0) items.push({ separator: true });
-    items.push({
-      label: inst.dishonored ? '☀ Restore Honor' : '☠ Dishonor',
-      sublabel: inst.dishonored
-        ? 'Remove dishonored status'
-        : 'Mark as dishonored — if killed, goes to Dishonorably Dead',
-      onClick: () => dishonorPersonality(inst.instanceId, target),
-      variant: inst.dishonored ? undefined : 'danger',
-    });
+    // ── Manual controls (player's own cards only) ─────────────────────────
+    if (!isOpponent) {
+      if (items.length > 0) items.push({ separator: true });
+
+      // Bow / Unbow
+      items.push({
+        label: inst.bowed ? '↺ Unbow' : '↷ Bow',
+        sublabel: inst.bowed ? 'Straighten this card' : 'Bow this card',
+        onClick: () => inst.bowed ? unbowCard(inst.instanceId, target) : bowCard(inst.instanceId, target),
+      });
+
+      // Dishonor / Rehonor
+      items.push({
+        label: inst.dishonored ? '☀ Restore Honor' : '☠ Dishonor',
+        sublabel: inst.dishonored ? 'Remove dishonored status' : 'Mark as dishonored',
+        onClick: () => inst.dishonored
+          ? rehonorPersonality(inst.instanceId, target)
+          : dishonorPersonality(inst.instanceId, target),
+        variant: inst.dishonored ? undefined : 'danger',
+      });
+
+      items.push({ separator: true });
+
+      // Move home (if assigned to battle)
+      const isAssigned = battleAssignments.some(a => a.instanceId === inst.instanceId)
+        || defenderAssignments.some(a => a.instanceId === inst.instanceId);
+      if (isAssigned) {
+        items.push({
+          label: '🏠 Move Home',
+          sublabel: 'Remove from battle, return home',
+          onClick: () => moveHome(inst.instanceId, target),
+        });
+      }
+
+      // Return to hand
+      items.push({
+        label: '↩ Return to Hand',
+        sublabel: 'Bounce to hand (attachments discarded)',
+        onClick: () => returnToHand(inst.instanceId, target),
+      });
+
+      // Discard from play
+      items.push({
+        label: '🗑 Discard from Play',
+        sublabel: 'To dynasty discard — no honor loss',
+        onClick: () => discardFromPlay(inst.instanceId, target),
+        variant: 'danger',
+      });
+
+      // Destroy
+      items.push({
+        label: '💀 Destroy',
+        sublabel: inst.dishonored ? 'To Dishonorably Dead' : 'To Honorably Dead',
+        onClick: () => destroyCard(inst.instanceId, target),
+        variant: 'danger',
+      });
+    }
 
     // ── Always: view card ────────────────────────────────────────────────
-    items.push({ separator: true });
+    if (items.length > 0) items.push({ separator: true });
     items.push({ label: 'View card', onClick: () => onModal?.(inst.card) });
 
     setCtxMenu({ items, x: e.clientX, y: e.clientY });
   };
 
-  // Holdings right-click: manual resolution + view card
+  // Holdings right-click: manual controls + view card
   const handleHoldingContextMenu = (inst: CardInstance, e: React.MouseEvent) => {
     if (isOpponent) return;
     e.preventDefault();
     const items: ContextMenuEntry[] = [];
+
     if (onManualAbility) {
       items.push({
         label: '⚙ Resolve manually',
@@ -374,6 +428,24 @@ export function InPlayRow({
       });
       items.push({ separator: true });
     }
+
+    items.push({
+      label: inst.bowed ? '↺ Unbow' : '↷ Bow',
+      onClick: () => inst.bowed ? unbowCard(inst.instanceId, target) : bowCard(inst.instanceId, target),
+    });
+    items.push({ separator: true });
+    items.push({
+      label: '🗑 Discard from Play',
+      sublabel: 'To dynasty discard',
+      onClick: () => discardFromPlay(inst.instanceId, target),
+      variant: 'danger',
+    });
+    items.push({
+      label: '💀 Destroy',
+      onClick: () => destroyCard(inst.instanceId, target),
+      variant: 'danger',
+    });
+    items.push({ separator: true });
     items.push({ label: 'View card', onClick: () => onModal?.(inst.card) });
     setCtxMenu({ items, x: e.clientX, y: e.clientY });
   };

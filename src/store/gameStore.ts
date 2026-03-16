@@ -381,6 +381,10 @@ interface GameStore {
   advancePhase: () => void;
   /** During Discard Phase: discard the face-up province card and refill face-down. */
   discardFromProvince: (provinceIndex: number, target: 'player' | 'opponent') => void;
+  /** Manually flip a province card face-up or face-down (for testing / manual resolution). */
+  flipProvinceCard: (provinceIndex: number, target: 'player' | 'opponent') => void;
+  /** Manually mark a province as broken (destroyed). */
+  breakProvince: (provinceIndex: number, target: 'player' | 'opponent') => void;
   /** During End Phase: discard a hand card to meet the 8-card hand limit. */
   discardHandCard: (instanceId: string, target: 'player' | 'opponent') => void;
 
@@ -1573,6 +1577,35 @@ export const useGameStore = create<GameStore>((set, get) => {
         ),
         dynastyDeck: restDynasty,
         dynastyDiscard: [...ps.dynastyDiscard, discarded],
+      },
+    });
+  },
+
+  flipProvinceCard: (provinceIndex, target) => {
+    const ps = get()[target];
+    const province = ps.provinces[provinceIndex];
+    if (!province?.card) return;
+    const newFaceUp = !province.faceUp;
+    pushLog(`${target === 'player' ? 'You' : 'Opponent'} flipped province ${provinceIndex + 1} ${newFaceUp ? 'face-up' : 'face-down'}`, 'other', target);
+    set({
+      [target]: {
+        ...ps,
+        provinces: ps.provinces.map((p, i) =>
+          i === provinceIndex ? { ...p, faceUp: newFaceUp, card: { ...p.card!, faceUp: newFaceUp } } : p,
+        ),
+      },
+    });
+  },
+
+  breakProvince: (provinceIndex, target) => {
+    const ps = get()[target];
+    pushLog(`${target === 'player' ? 'Your' : "Opponent's"} province ${provinceIndex + 1} is broken`, 'other', target);
+    set({
+      [target]: {
+        ...ps,
+        provinces: ps.provinces.map((p, i) =>
+          i === provinceIndex ? { ...p, broken: true, card: null, faceUp: false } : p,
+        ),
       },
     });
   },

@@ -77,6 +77,8 @@ export function GameRow({
   const discardFromProvince   = useGameStore(s => s.discardFromProvince);
   const discardHandCard       = useGameStore(s => s.discardHandCard);
   const useKharmic            = useGameStore(s => s.useKharmic);
+  const flipProvinceCard      = useGameStore(s => s.flipProvinceCard);
+  const breakProvince         = useGameStore(s => s.breakProvince);
   const turnPhase             = useGameStore(s => s.turnPhase);
   const turnNumber            = useGameStore(s => s.turnNumber);
   const cyclingActive         = useGameStore(s => s.cyclingActive);
@@ -89,8 +91,6 @@ export function GameRow({
   const battleStage           = useGameStore(s => s.battleStage);
   const battleWindowPriority  = useGameStore(s => s.battleWindowPriority);
 
-  const isDynasty  = turnPhase === 'dynasty';
-  const isDiscard  = turnPhase === 'discard';
   const isEnd      = turnPhase === 'end';
   const isAction   = turnPhase === 'action';
   const isAttack   = turnPhase === 'attack';
@@ -137,28 +137,29 @@ export function GameRow({
 
   const handleProvinceRightClick = (province: Province, e: React.MouseEvent) => {
     e.preventDefault();
-    if (!province.card || !province.faceUp || isOpponent) return;
-    const cardData = province.card.card;
+    if (isOpponent) return;
+    const cardData = province.card?.card ?? null;
     const items: ContextMenuEntry[] = [];
 
-    // ── Discard Phase ─────────────────────────────────────────────────────
-    if (isDiscard) {
+    // ── Flip face-up / face-down (any province with a card) ───────────────
+    if (province.card && !province.broken) {
       items.push({
-        label: 'Discard from Province',
-        sublabel: 'refills face-down',
-        onClick: () => discardFromProvince(province.index, target),
-        variant: 'danger',
+        label: province.faceUp ? '🔽 Flip Face-Down' : '🔼 Flip Face-Up',
+        sublabel: 'Toggle province card visibility',
+        onClick: () => flipProvinceCard(province.index, target),
       });
     }
 
-    // ── Dynasty Phase ─────────────────────────────────────────────────────
-    if (isDynasty) {
-      const baseCost      = Math.max(0, Number(cardData.cost) || 0);
-      const playerClan    = player.stronghold?.clan?.toLowerCase() ?? '';
-      const cardClan      = cardData.clan?.toLowerCase() ?? '';
-      const isSameClan    = !!playerClan && !!cardClan && playerClan === cardClan;
+    // ── Recruit (always available when face-up and has a personality/holding) ─
+    if (cardData && province.faceUp && !province.broken) {
+      const baseCost   = Math.max(0, Number(cardData.cost) || 0);
+      const playerClan = player.stronghold?.clan?.toLowerCase() ?? '';
+      const cardClan   = cardData.clan?.toLowerCase() ?? '';
+      const isSameClan = !!playerClan && !!cardClan && playerClan === cardClan;
       const isPersonality = cardData.type === 'personality';
-      const canAfford     = (c: number) => player.goldPool >= c;
+      const canAfford  = (c: number) => player.goldPool >= c;
+
+      if (items.length > 0) items.push({ separator: true });
 
       if (isSameClan && isPersonality) {
         const discountCost = Math.max(0, baseCost - 2);
@@ -183,32 +184,59 @@ export function GameRow({
           onClick: () => recruitFromProvince(province.index, target),
           disabled: !canAfford(baseCost),
         });
-      } else {
+      } else if (cardData.type !== 'region') {
         items.push({
           label: 'Recruit',
-          sublabel: `${Math.max(0, Number(cardData.cost) || 0)}g`,
+          sublabel: `${baseCost}g`,
           onClick: () => recruitFromProvince(province.index, target),
-          disabled: !canAfford(Math.max(0, Number(cardData.cost) || 0)),
+          disabled: !canAfford(baseCost),
           variant: 'primary',
         });
       }
     }
 
-    // ── Kharmic (Limited, action or attack phase, player only) ─────────────
-    const isKharmic = cardData.keywords.some(k => k.toLowerCase().trim() === 'kharmic');
-    if (!isOpponent && isKharmic && (isAction || isAttack)) {
+    // ── Kharmic (Limited, action or attack phase) ──────────────────────────
+    if (cardData && province.faceUp) {
+      const isKharmic = cardData.keywords.some(k => k.toLowerCase().trim() === 'kharmic');
+      if (isKharmic && (isAction || isAttack)) {
+        items.push({
+          label: 'Kharmic — discard to refill face-up',
+          sublabel: `2g — Repeatable Limited`,
+          onClick: () => useKharmic('province', province.card!.instanceId, target, province.index),
+          disabled: player.goldPool < 2,
+          variant: 'primary',
+        });
+      }
+    }
+
+    // ── Discard from Province ──────────────────────────────────────────────
+    if (province.card && !province.broken) {
+      if (items.length > 0) items.push({ separator: true });
       items.push({
-        label: 'Kharmic — discard to refill face-up',
-        sublabel: `2g — Repeatable Limited`,
-        onClick: () => useKharmic('province', province.card!.instanceId, target, province.index),
-        disabled: player.goldPool < 2,
-        variant: 'primary',
+        label: '🗑 Discard from Province',
+        sublabel: 'Refills face-down from dynasty deck',
+        onClick: () => discardFromProvince(province.index, target),
+        variant: 'danger',
       });
     }
 
-    if (items.length > 0) items.push({ separator: true });
-    items.push({ label: 'View card', onClick: () => onModal?.(cardData) });
-    setCtxMenu({ items, x: e.clientX, y: e.clientY });
+    // ── Break Province ─────────────────────────────────────────────────────
+    if (!province.broken) {
+      items.push({
+        label: '💥 Break Province',
+        sublabel: 'Mark as broken — cannot be attacked again',
+        onClick: () => breakProvince(province.index, target),
+        variant: 'danger',
+      });
+    }
+
+    // ── View card ──────────────────────────────────────────────────────────
+    if (cardData) {
+      if (items.length > 0) items.push({ separator: true });
+      items.push({ label: 'View card', onClick: () => onModal?.(cardData) });
+    }
+
+    if (items.length > 0) setCtxMenu({ items, x: e.clientX, y: e.clientY });
   };
 
   return (
@@ -608,7 +636,6 @@ function ProvinceSlot({ province, strength, forceHidden, h, isCycling, cycleSele
   attackForce?: number;
 } & SharedPreviewProps) {
   const faceDown   = forceHidden || !province.faceUp;
-  const canRecruit = !forceHidden && province.faceUp && !!province.card;
   const canCycleThis = isCycling && !forceHidden && !!province.card && !province.broken;
   const bf = BATTLEFIELD_STYLES[province.index];
   const hasRegion = !!province.region;
@@ -695,7 +722,7 @@ function ProvinceSlot({ province, strength, forceHidden, h, isCycling, cycleSele
                 ].join(' ')}
                 style={{ height: '100%', width: '100%', aspectRatio: '2.5/3.5' }}
                 onClick={canCycleThis ? onToggleCycleSelect : undefined}
-                onContextMenu={canRecruit && !isCycling
+                onContextMenu={!isCycling
                   ? (e) => onProvinceRightClick?.(province, e)
                   : undefined
                 }
@@ -704,6 +731,7 @@ function ProvinceSlot({ province, strength, forceHidden, h, isCycling, cycleSele
             : <div
                 className="card-slot-empty w-full h-full"
                 style={{ aspectRatio: '2.5/3.5' }}
+                onContextMenu={!isCycling ? (e) => onProvinceRightClick?.(province, e) : undefined}
               >
                 <span className="text-gray-700 text-[9px]">—</span>
               </div>
