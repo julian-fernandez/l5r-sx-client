@@ -368,7 +368,90 @@ export function BattleStrip({
     );
   }
 
-  // ── ASSIGNING or RESOLVING ────────────────────────────────────────────────
+  // ── PICK BATTLEFIELD (resolving) ─────────────────────────────────────────
+  if (battleStage === 'resolving') {
+    return (
+      <div className="flex flex-col gap-2 flex-shrink-0 px-3 py-2 bg-orange-950/25 border-y border-orange-800/50">
+        <StepIndicator steps={STEPS} current={currentStep} />
+
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <span className="text-[11px] font-bold text-orange-300 animate-pulse">⚔ Pick a Battlefield</span>
+            <span className="text-[8px] text-gray-500">Attacker chooses which province to resolve — Engage window opens next</span>
+          </div>
+          <button onClick={onEndAttackPhase} className="text-[9px] px-2 py-0.5 rounded border border-gray-700 text-gray-500 hover:text-gray-300 hover:border-gray-500 transition-colors">
+            No Battle
+          </button>
+        </div>
+
+        <div className="flex gap-3 flex-wrap">
+          {battlefields.map(([provinceIndex, assignments]) => {
+            const bf = BATTLEFIELD_STYLES[provinceIndex] ?? BATTLEFIELD_STYLES[0];
+            const { defenseTotal, attackers, defenders, totalForce, winning } = stats(provinceIndex, assignments);
+            return (
+              <button
+                key={provinceIndex}
+                onClick={() => selectBattlefield(provinceIndex)}
+                className={[
+                  'flex flex-col gap-1.5 px-3 py-2 rounded-xl border-2 text-left transition-all duration-150',
+                  'animate-pulse hover:animate-none hover:scale-[1.03] active:scale-100',
+                  `${bf.border} hover:bg-orange-950/30 bg-board-bg cursor-pointer`,
+                ].join(' ')}
+                style={{ minWidth: 180 }}
+                title={`Fight at Province ${provinceIndex + 1} — ${totalForce}f vs ${defenseTotal}`}
+              >
+                {/* Header */}
+                <div className="flex items-center justify-between gap-3">
+                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${bf.badge}`}>
+                    Province {provinceIndex + 1}
+                  </span>
+                  <span className={`text-[10px] font-bold tabular-nums ${winning ? 'text-emerald-400' : 'text-red-400'}`}>
+                    {totalForce}f vs {defenseTotal}
+                  </span>
+                </div>
+
+                {/* Attacker list */}
+                <div className="flex flex-col gap-0.5">
+                  {attackers.map(p => (
+                    <div key={p.instanceId} className="flex items-center justify-between gap-2">
+                      <span className={`text-[8px] truncate max-w-[120px] ${isCavalryUnit(p) ? 'text-yellow-300' : 'text-gray-300'}`}>
+                        {isCavalryUnit(p) ? '🐴' : '⚔'} {p.card.name}
+                      </span>
+                      <span className="text-[8px] text-gray-500 tabular-nums flex-shrink-0">{calcUnitForce(p, true)}f</span>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Defender list */}
+                {defenders.length > 0 && (
+                  <div className="flex flex-col gap-0.5 border-t border-board-border pt-0.5">
+                    {defenders.map(p => (
+                      <div key={p.instanceId} className="flex items-center justify-between gap-2">
+                        <span className="text-[8px] truncate max-w-[120px] text-rose-300">🛡 {p.card.name}</span>
+                        <span className="text-[8px] text-rose-600 tabular-nums flex-shrink-0">{calcUnitForce(p, true)}f</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {defenders.length === 0 && (
+                  <p className="text-[7px] text-gray-700 italic">No defenders</p>
+                )}
+
+                {/* Result preview */}
+                <div className={`text-center text-[9px] font-bold py-1 rounded mt-0.5 ${
+                  winning ? 'bg-emerald-900/40 text-emerald-300' : 'bg-gray-900/60 text-gray-500'
+                }`}>
+                  {winning ? '→ BREAK' : '→ Province Holds'}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    );
+  }
+
+  // ── ASSIGNING ─────────────────────────────────────────────────────────────
 
   // Infantry phase: if ALL available (unbowed) personalities are Cavalry,
   // there is nothing to assign here — allow proceeding with 0 assignments.
@@ -384,21 +467,17 @@ export function BattleStrip({
 
       <div className="flex items-center justify-between gap-2">
         <span className="text-[8px] text-gray-500 italic flex-1 min-w-0">
-          {battleStage === 'assigning'
-            ? 'Right-click your non-Cavalry personalities to assign attackers'
-            : 'Choose which battlefield to resolve first'}
+          Right-click your non-Cavalry personalities to assign attackers
         </span>
         <div className="flex items-center gap-1.5 flex-shrink-0">
-          {battleStage === 'assigning' && (
-            <button
-              onClick={beginResolution}
-              disabled={!canCommitInfantry}
-              className="text-[9px] font-bold px-2.5 py-0.5 rounded border border-red-600 text-red-200 bg-red-950/60 hover:bg-red-900 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
-              title="Lock in infantry assignments — defender may now assign"
-            >
-              Finish Assignments →
-            </button>
-          )}
+          <button
+            onClick={beginResolution}
+            disabled={!canCommitInfantry}
+            className="text-[9px] font-bold px-2.5 py-0.5 rounded border border-red-600 text-red-200 bg-red-950/60 hover:bg-red-900 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+            title="Lock in infantry assignments — defender may now assign"
+          >
+            Finish Assignments →
+          </button>
           <button
             onClick={onEndAttackPhase}
             className="text-[9px] px-2 py-0.5 rounded border border-gray-700 text-gray-500 hover:text-gray-300 hover:border-gray-500 transition-colors"
@@ -416,7 +495,7 @@ export function BattleStrip({
         defenderAssignments={defenderAssignments}
         opponentProvinces={opponentProvinces}
         battleStage={battleStage}
-        onSelectBattlefield={battleStage === 'resolving' ? selectBattlefield : null}
+        onSelectBattlefield={null}
       />
     </div>
   );
